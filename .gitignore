@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets/
+secrets.*
+.azure/
+.aws/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Local data and uploaded media
+*.db
+*.sqlite
+*.sqlite3
+uploads/
+media/
+tmp/
+temp/
+
+# Logs and operating-system files
+*.log
+.DS_Store
+Thumbs.db
