@@ -1,93 +1,72 @@
 # PLAN.md - ShelfSense AI
 
+> FOR MUSE CODE: Read this file before EVERY task. Do NOT build anything in OUT OF SCOPE. After a task, update checkboxes [ ] to [x] and STOP at each CHECKPOINT.
+
 ## 1. Project Lock
 Name: ShelfSense AI
-Track: Indie Developer - Build For Your World
+Track: Indie Developer (Solo) - Build For Your World
 Deadline: Nov 4, 9:00 PM ET
 One-liner: Turn one shelf photo into live inventory and a supplier reorder in 60 seconds.
-Target User: Small shops, cafes, kiosks, mini-marts
+Target User: Small shops, cafes, kiosks, mini-marts, pharmacies
+Lead Developer: njugTumz (https://github.com/njugTumz)
+AI Coding Agent: Muse Code by Meta
 
-## 2. Judging Optimization
-Impact (30%): Prevent stockouts/waste for small businesses
-Meta Tooling (25%): SAM 3.1 (count/segment) + Muse Spark (identify/reason) + Muse Voice Transcribe (update)
-Demo (25%): Live photo-to-inventory-to-order flow, no slides
-Technical (20%): Clean Architecture, SOLID, verifiable agent steps, Azure deployed
+## 1A. Deployment-First Rule
+Deploy on Azure from Checkpoint 1. Every checkpoint must work on LIVE Azure URL, not just localhost.
+Frontend: Azure Static Web Apps
+Backend: Azure Container Apps (Docker, Port 8000)
+Resource Group: shelfsense-rg (East US)
+Live Frontend URL: TO_BE_FILLED
+Live Backend URL: TO_BE_FILLED
+Secrets (META_API_KEY) ONLY in Azure + local backend/.env. NEVER in frontend/git.
 
-## 3. MVP Scope - ONLY THIS IN 8 HOURS
-[ ] Upload shelf image (jpg/png)
-[ ] Agent pipeline with live status steps
-[ ] SAM 3.1 segmentation/count OR fallback bounding detection via Muse Spark if SAM API fails
-[ ] Muse Spark identifies products: name, category, count, confidence, stock_level (ok/low/empty)
-[ ] Inventory table (editable count/name, persisted in SQLite)
-[ ] Low-stock dashboard cards: Total SKUs, Low Stock, Out of Stock
-[ ] Reorder Agent: generates supplier order text/list from low items
-[ ] Voice Note: upload/record audio -> Muse Voice Transcribe -> Muse Spark updates inventory intent
-[ ] Demo Mode: 3 pre-loaded shelf images with cached results (INSURANCE if API is slow live)
-[ ] Deployed on Azure + Public GitHub repo
+## 1B. Mobile-First + PWA
+Phone-first for shopkeepers. Design for 375px first.
+- Min touch target 44x44px, bottom CTA bar on mobile
+- Camera input MUST be: <input type="file" accept="image/*" capture="environment">
+- Inventory shows as cards on mobile, table on desktop
+- PWA via vite-plugin-pwa: Installable, manifest name "ShelfSense AI", short_name "ShelfSense", theme_color #0f172a, display standalone, icons 192x192 + 512x512, service worker caches app shell + demo images for offline Demo Mode
+
+## 1C. Judging Optimization
+Impact 30%: Prevent stockouts/waste for small businesses
+Meta Tooling 25%: SAM 3.1 (segment/count) + Muse Spark (identify/reason) + Muse Voice Transcribe (hands-free updates)
+Demo 25%: Live photo -> inventory -> reorder on Azure, works on phone
+Technical 20%: Clean Architecture, SOLID, Docker, Azure deployed
+
+## 2. MVP Scope - ONLY THIS
+[ ] Upload/take shelf photo
+[ ] Agent timeline: SAM -> Muse Spark -> Stock Assessment
+[ ] Inventory list extracted: name, category, count, confidence, stock_level (ok/low/out)
+[ ] Stats: Total SKUs, Low Stock, Out of Stock
+[ ] Editable inventory (change count/name)
+[ ] Reorder Agent: generates supplier order text from low/out items
+[ ] Voice Note: record/upload audio -> transcribe -> update inventory
+[ ] Demo Mode: 3 pre-loaded shelves with cached results - WORKS WITHOUT API KEY
+[ ] Public GitHub + 3-min demo video + Live Azure links
 
 ## OUT OF SCOPE - DO NOT BUILD
-[ ] Auth / Login, Payments, Real supplier API/email sending, Barcode scanner, Multi-store, Mobile app
+Auth/Login, Payments, Real email/supplier API, Barcode scanner, Multi-store, Native mobile app
 
-## 4. Architecture - Clean Architecture + SOLID
-Backend: Python 3.11 + FastAPI
-Frontend: React + Vite + Tailwind CSS (no other UI lib)
-Hosting: Azure Container Apps (Backend) + Azure Static Web Apps (Frontend)
-DB: SQLite (file-based, keep simple)
+## 3. Architecture - Clean Architecture + SOLID
+Backend: Python 3.11, FastAPI. Frontend: React + Vite + Tailwind. DB: SQLite
+backend/app/domain/ (entities, no framework), application/ (use cases), infrastructure/ (Meta clients, DB), interfaces/ (FastAPI routes), core/ (config, DI)
+frontend/src/features/, components/, services/api.ts
+SOLID: 1 client per Meta model, routes only call UseCases, UseCases depend on interfaces not concrete clients
 
-Backend Structure:
-backend/
-  app/
-    domain/          # Entities: Product, InventoryItem, Scan, Reorder - no framework code
-    application/     # UseCases: AnalyzeShelfUseCase, GenerateReorderUseCase, ProcessVoiceNoteUseCase
-    infrastructure/  # Meta clients: SamClient, MuseSparkClient, VoiceClient, SQLite repos
-    interfaces/      # FastAPI routers, DTOs/schemas
-    core/            # config, DI container
-  main.py
+## 4. APIs
+POST /api/scans/analyze -> {scan_id, items[], summary}
+GET /api/inventory, PATCH /api/inventory/{id}
+POST /api/reorder/generate -> {order_text, items}
+POST /api/voice-note -> {transcript, applied_updates}
+GET /api/health -> {status:ok, demo_mode:bool}
+If META_API_KEY missing, backend still starts in demo_mode.
 
-SOLID Rules:
-S: Each Meta client = 1 model only. Each UseCase = 1 job.
-O: Add new model via new client, don't modify UseCases.
-L/I: UseCases depend on interfaces (IModelClient, IInventoryRepo), not concrete clients.
-D: FastAPI routes only call UseCases, never call Meta API directly.
+## 5. Checkpoints
+CHECKPOINT 1: Scaffold + Mobile PWA + Docker + LIVE Azure Deploy of health check
+CHECKPOINT 2: Python script tests Muse Spark on 1 shelf image, returns clean JSON
+CHECKPOINT 3: Full analyze flow photo->table works live
+CHECKPOINT 4: Reorder + Voice + Demo Mode works live
+CHECKPOINT 5: Final polish, README, video, submit
 
-Frontend Structure:
-frontend/src/
-  features/upload, features/inventory, features/reorder, features/voice
-  components/AgentTimeline.tsx, InventoryTable.tsx, StatCard.tsx
-  services/api.ts
-  App.tsx
-
-## 5. API Contracts
-POST /api/scans/analyze {image} -> {scan_id, items:[{name,category,count,confidence,stock_level,bbox?}], summary}
-GET  /api/inventory -> [items]
-PATCH /api/inventory/{id} {count, name}
-POST /api/reorder/generate {supplier_name} -> {order_text, items}
-POST /api/voice-note {audio} -> {transcript, applied_updates}
-GET  /api/health -> {status: ok}
-
-## 6. Agent Pipeline (Show in UI)
-Step 1: SAM 3.1 - Segmenting products...
-Step 2: Muse Spark - Identifying products...
-Step 3: Muse Spark - Assessing stock risk...
-Step 4: Agent - Updating inventory & flagging low stock
-
-## 7. Checkpoints for Muse Code
-CHECKPOINT 1: Repo scaffolded, health endpoint works, frontend runs - STOP & VERIFY
-CHECKPOINT 2: Meta API test script works for Muse Spark with 1 image - STOP & VERIFY
-CHECKPOINT 3: Full analyze flow returns real JSON to frontend table - STOP & VERIFY
-CHECKPOINT 4: Reorder + Demo Mode works end-to-end - STOP & VERIFY
-CHECKPOINT 5: Azure deployed, env vars set, demo video ready - STOP
-
-## 8. Azure Deployment
-Backend: Azure Container Apps, env: META_API_KEY, set CORS to frontend URL
-Frontend: Azure Static Web Apps, env: VITE_API_URL = backend URL
-Secrets: NEVER in frontend or git. Only backend.
-
-## 9. Demo Script (3 Minutes)
-0:00 Pain: Shop owner manually counts shelves
-0:20 Upload shelf photo live
-0:40 Agent timeline - explain SAM + Muse Spark
-1:10 Inventory appears, show low-stock items
-1:40 Edit a count, say voice note "sold 3 milks"
-2:10 Generate supplier reorder
-2:40 Impact + close: Built with Muse Spark, SAM 3.1, Voice on Azure
+## 6. Local Setup Goal
+Judge clones and runs in <5 mins with Docker or manual. No Azure needed, no API key needed for Demo Mode.
