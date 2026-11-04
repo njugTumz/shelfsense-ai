@@ -36,6 +36,7 @@ uploads/
 media/
 tmp/
 temp/
+scripts/smoke/out/
 
 # Logs and operating-system files
 *.log

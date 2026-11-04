@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
+from app.api.missions import router as missions_router
 from app.core.config import get_settings
 
 
@@ -22,6 +23,7 @@ def create_app() -> FastAPI:
         allow_headers=["Content-Type"],
     )
     app.include_router(health_router)
+    app.include_router(missions_router)
     return app
 
 

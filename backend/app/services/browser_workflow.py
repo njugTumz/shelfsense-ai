@@ -1,0 +1,498 @@
+"""Real browser interaction testing inside the E2B sandbox.
+
+FIELD owns the test runner (Muse Spark never generates it). The script
+below drives headless Firefox against the in-sandbox preview over
+localhost, discovers controls by accessible roles with fallbacks, and
+reports per-step JSON. The backend maps steps to verification checks:
+required-by-spec workflows that are missing or broken FAIL; workflows
+the spec never asks for SKIP (never pass).
+
+Workflow ``restaurant``: load -> create -> advance x2 -> invalid ->
+reload/persist. Other workflows can be added as new scripts; the
+report/check mapping stays shared.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import time
+
+from app.models.verification import (
+    BrowserScreenshot,
+    BrowserStep,
+    BrowserStepStatus,
+    BrowserTestResult,
+    CheckCategory,
+    CheckStatus,
+    VerificationCheck,
+)
+
+BROWSER_SCRIPT_PATH = "/tmp/browser_workflow.check.py"
+SCREENSHOT_JPG_QUALITY = 60
+
+CREATE_KEYWORDS = ("create", "add", "new order", "entry", "submit", "form")
+ADVANCE_KEYWORDS = ("status", "transition", "preparing", "ready", "move", "advance", "update")
+INVALID_KEYWORDS = ("invalid", "reject")
+PERSIST_KEYWORDS = ("persist", "reload", "refresh", "storage", "survive")
+
+STEP_CHECK_NAMES = {
+    "load": "browser_loads_app",
+    "create": "browser_creates_order",
+    "advance": "browser_advances_status",
+    "invalid": "browser_rejects_invalid",
+    "persist": "browser_persists_after_reload",
+}
+
+BROWSER_SCRIPT = r'''
+"""FIELD-owned restaurant workflow test. argv: url marker. Prints BROWSER_JSON line."""
+import json
+import re
+import sys
+import time
+
+URL, MARKER = sys.argv[1], sys.argv[2]
+ADVANCE_BUTTON = re.compile("advance|next|move|mark|progress|forward", re.I)
+SUBMIT_BUTTON = re.compile("add|create|submit|save|new order", re.I)
+
+
+def main():
+    from playwright.sync_api import sync_playwright
+
+    steps = []
+    shots = []
+
+    def rec(name, status, detail="", ms=0):
+        steps.append({"name": name, "status": status, "detail": detail[:800],
+                      "duration_ms": int(ms)})
+
+    def shot(page, name):
+        try:
+            path = f"/tmp/browser_{name}.jpg"
+            page.screenshot(path=path, type="jpeg", quality=60)
+            shots.append({"name": name, "path": path})
+        except Exception:
+            pass
+
+    def timed():
+        return time.time()
+
+    def fill_create_form(scope, marker):
+        """Fill every fillable control so realistic multi-field forms submit.
+
+        Generated apps may ask for label + details + type; filling only the
+        first box leaves required fields empty and the submit silently does
+        nothing. Returns counts for diagnostics.
+        """
+        counts = {"text": 0, "number": 0, "check": 0}
+        try:
+            boxes = scope.get_by_role("textbox").all()
+        except Exception:
+            boxes = []
+        if not boxes:
+            try:
+                boxes = scope.locator("input[type='text'], input:not([type]), textarea").all()
+            except Exception:
+                boxes = []
+        for box in boxes:
+            try:
+                if box.is_visible() and not box.is_disabled():
+                    box.fill(marker)
+                    counts["text"] += 1
+            except Exception:
+                pass
+        try:
+            nums = scope.get_by_role("spinbutton").all()
+        except Exception:
+            nums = []
+        for num in nums:
+            try:
+                if num.is_visible() and not num.is_disabled() and not num.input_value():
+                    num.fill("1")
+                    counts["number"] += 1
+            except Exception:
+                pass
+        try:
+            checks = scope.get_by_role("checkbox").all()
+        except Exception:
+            checks = []
+        for check in checks:
+            try:
+                if check.is_visible() and not check.is_disabled() and not check.is_checked():
+                    check.check()
+                    counts["check"] += 1
+            except Exception:
+                pass
+        return counts
+
+    with sync_playwright() as pw:
+        browser = pw.firefox.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.set_default_timeout(15000)
+        version = browser.version
+        try:
+            t0 = timed()
+            page.goto(URL, wait_until="load")
+            page.locator("h1").first.wait_for(state="visible")
+            heading = page.locator("h1").first.inner_text()[:100]
+            rec("load", "pass", f"loaded; heading: {heading}", (timed() - t0) * 1000)
+        except Exception as exc:
+            rec("load", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+            for name in ("create", "advance", "invalid", "persist"):
+                rec(name, "blocked", "page did not load")
+            return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
+
+        identifier = None
+        last_status = "Received"
+
+        # --- create ---
+        t0 = timed()
+        try:
+            form = page.locator("form").first
+            scope = form if form.count() else page
+            counts = fill_create_form(scope, MARKER)
+            if counts["text"] == 0:
+                rec("create", "not_applicable", "no text input found", (timed() - t0) * 1000)
+            else:
+                submit = scope.locator("button[type='submit']").first
+                if submit.count() == 0:
+                    submit = scope.get_by_role("button", name=SUBMIT_BUTTON).first
+                if submit.count() == 0:
+                    submit = scope.get_by_role("button").first
+                if submit.count() == 0:
+                    rec("create", "fail", "text input found but no submit button", (timed() - t0) * 1000)
+                else:
+                    submit.click()
+                    page.get_by_text(MARKER).first.wait_for(state="visible")
+                    identifier = MARKER
+                    rec("create", "pass",
+                        f"order created; marker visible in list (filled {counts['text']} text, "
+                        f"{counts['number']} number, {counts['check']} check)",
+                        (timed() - t0) * 1000)
+                    shot(page, "created")
+        except Exception as exc:
+            shot(page, "create_failed")
+            rec("create", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
+        # --- advance Received -> Preparing -> Ready ---
+        t0 = timed()
+        try:
+            if identifier is None:
+                first_li = page.locator("li").first
+                if first_li.count() == 0:
+                    rec("advance", "not_applicable", "no order list items found", (timed() - t0) * 1000)
+                else:
+                    strong = first_li.locator("strong").first
+                    identifier = (strong.inner_text() if strong.count() else first_li.inner_text()[:24]).strip()
+                    if not identifier:
+                        rec("advance", "fail", "first list item has no readable identifier", (timed() - t0) * 1000)
+                    identifier = identifier or None
+            if identifier is not None and not any(s["name"] == "advance" for s in steps):
+                item = page.locator("li", has_text=identifier).first
+                if item.count() == 0:
+                    rec("advance", "fail", f"order item {identifier!r} not found", (timed() - t0) * 1000)
+                else:
+                    sel = item.locator("select").first
+                    if sel.count() > 0:
+                        chain = [sel.input_value()]
+                        for _ in (1, 2):
+                            opts = [o.strip() for o in sel.locator("option").all_inner_texts()]
+                            try:
+                                nxt = opts[opts.index(chain[-1]) + 1]
+                            except (ValueError, IndexError):
+                                raise AssertionError(f"no further status option after {chain[-1]!r}")
+                            sel.select_option(label=nxt)
+                            page.wait_for_timeout(400)
+                            if sel.input_value() != nxt:
+                                raise AssertionError(f"control shows {sel.input_value()!r}, expected {nxt!r}")
+                            chain.append(nxt)
+                        last_status = chain[-1]
+                        rec("advance", "pass", f"select: status advanced twice ({' -> '.join(chain)})",
+                            (timed() - t0) * 1000)
+                    else:
+                        btn = item.get_by_role("button", name=ADVANCE_BUTTON).first
+                        if btn.count() == 0:
+                            rec("advance", "not_applicable", "order item has no status control (select or button)",
+                                (timed() - t0) * 1000)
+                        else:
+                            chain = []
+                            for _ in (1, 2):
+                                item = page.locator("li", has_text=identifier).first
+                                btn = item.get_by_role("button", name=ADVANCE_BUTTON).first
+                                if btn.count() == 0:
+                                    raise AssertionError("no advance button for next transition")
+                                name = (btn.get_attribute("aria-label") or btn.inner_text() or "").strip()
+                                match = re.search(r"(?:to|mark)\s+(.+)$", name, re.I)
+                                if not match:
+                                    raise AssertionError(f"advance button does not state next status: {name!r}")
+                                expected = match.group(1).strip()
+                                btn.click()
+                                page.wait_for_timeout(400)
+                                item = page.locator("li", has_text=identifier).first
+                                if item.get_by_text(expected, exact=True).count() == 0:
+                                    raise AssertionError(f"status {expected!r} not shown after advance")
+                                chain.append(expected)
+                            last_status = chain[-1]
+                            rec("advance", "pass",
+                                f"buttons: status advanced twice (… -> {' -> '.join(chain)}), badges verified",
+                                (timed() - t0) * 1000)
+                    shot(page, "advanced")
+        except AssertionError as exc:
+            rec("advance", "fail", str(exc)[:500], (timed() - t0) * 1000)
+        except Exception as exc:
+            rec("advance", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
+        # --- invalid: fresh Received item, attempt illegal skip (select apps only) ---
+        t0 = timed()
+        try:
+            if identifier is None:
+                rec("invalid", "blocked", "no order identifier available", (timed() - t0) * 1000)
+            else:
+                page.reload(wait_until="load")
+                page.locator("h1").first.wait_for(state="visible")
+                item = page.locator("li", has_text=identifier).first
+                sel = item.locator("select").first if item.count() else None
+                if sel is None or sel.count() == 0:
+                    rec("invalid", "not_applicable", "no select control; buttons only offer valid transitions",
+                        (timed() - t0) * 1000)
+                else:
+                    opts = [o.strip() for o in sel.locator("option").all_inner_texts()]
+                    if len(opts) < 3:
+                        rec("invalid", "not_applicable",
+                            "no skippable option; invalid transitions not expressible",
+                            (timed() - t0) * 1000)
+                    else:
+                        initial, skip_target = opts[0], opts[2]
+                        target = identifier
+                        if sel.input_value() != initial:
+                            marker2 = MARKER + "-2"
+                            form = page.locator("form").first
+                            scope = form if form.count() else page
+                            counts = fill_create_form(scope, marker2)
+                            if counts["text"] == 0:
+                                rec("invalid", "not_applicable", "cannot obtain a fresh initial-status item",
+                                    (timed() - t0) * 1000)
+                                target = None
+                            else:
+                                scope.get_by_role("button").first.click()
+                                page.get_by_text(marker2).first.wait_for(state="visible")
+                                target = marker2
+                        if target is not None:
+                            item = page.locator("li", has_text=target).first
+                            sel = item.locator("select").first
+                            sel.select_option(label=skip_target)
+                            page.wait_for_timeout(400)
+                            if sel.input_value() == initial:
+                                notice = page.get_by_role("alert").count() > 0
+                                rec("invalid", "pass",
+                                    f"skip to {skip_target} rejected, stayed {initial} (notice shown: {notice})",
+                                    (timed() - t0) * 1000)
+                            else:
+                                rec("invalid", "fail",
+                                    f"illegal skip accepted: status is {sel.input_value()!r}",
+                                    (timed() - t0) * 1000)
+        except Exception as exc:
+            rec("invalid", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
+        # --- persist: reload, identifier + last status must survive ---
+        t0 = timed()
+        try:
+            if identifier is None:
+                rec("persist", "blocked", "no order identifier available", (timed() - t0) * 1000)
+            else:
+                page.reload(wait_until="load")
+                page.locator("h1").first.wait_for(state="visible")
+                item = page.locator("li", has_text=identifier).first
+                if item.count() == 0:
+                    rec("persist", "fail", f"order {identifier!r} missing after reload", (timed() - t0) * 1000)
+                else:
+                    sel = item.locator("select").first
+                    if sel.count() > 0:
+                        ok = sel.input_value() == last_status
+                    else:
+                        ok = item.get_by_text(last_status, exact=True).count() > 0
+                    if ok:
+                        rec("persist", "pass", f"order + {last_status} status survived reload", (timed() - t0) * 1000)
+                    else:
+                        rec("persist", "fail", f"order present but {last_status} status lost after reload",
+                            (timed() - t0) * 1000)
+                shot(page, "reloaded")
+        except Exception as exc:
+            rec("persist", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
+        browser.close()
+        return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
+
+
+try:
+    report = main()
+except Exception as exc:  # never exit without a machine-readable report
+    import traceback
+
+    report = {"browser": "firefox (crashed)", "steps": [
+        {"name": n, "status": "fail" if n == "load" else "blocked",
+         "detail": f"runner crashed: {traceback.format_exc(limit=3)[-500:]}", "duration_ms": 0}
+        for n in ("load", "create", "advance", "invalid", "persist")], "screenshots": []}
+print("BROWSER_JSON:" + json.dumps(report))
+'''
+
+
+def determine_required_steps(acceptance_criteria: list[str] | None) -> dict[str, bool]:
+    """Which browser steps the spec demands (pure; everything else may skip)."""
+    joined = " ".join(acceptance_criteria or []).lower()
+
+    def mentions(keywords: tuple[str, ...]) -> bool:
+        return any(kw in joined for kw in keywords)
+
+    return {
+        "load": True,
+        "create": mentions(CREATE_KEYWORDS),
+        "advance": mentions(ADVANCE_KEYWORDS),
+        "invalid": mentions(INVALID_KEYWORDS),
+        "persist": mentions(PERSIST_KEYWORDS),
+    }
+
+
+def browser_steps_to_checks(
+    report: BrowserTestResult, required: dict[str, bool]
+) -> list[VerificationCheck]:
+    """Map executed browser steps to checks. SKIP never counts as pass;
+    required-but-missing workflows FAIL with the discovery reason."""
+    by_name = {step.name: step for step in report.steps}
+    checks: list[VerificationCheck] = []
+    for step_name, check_name in STEP_CHECK_NAMES.items():
+        step = by_name.get(step_name)
+        is_required = required.get(step_name, step_name == "load")
+        category = CheckCategory.RUNTIME if step_name == "load" else CheckCategory.FUNCTIONAL
+        if step is None:
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.FAIL,
+                required=is_required,
+                detail=f"Browser step {step_name!r} missing from report.",
+            ))
+            continue
+        latency = round(step.duration_ms / 1000, 1)
+        if step.status == BrowserStepStatus.PASS:
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.PASS,
+                required=is_required, detail=f"Real browser: {step.detail}", latency_s=latency,
+            ))
+        elif step.status == BrowserStepStatus.NOT_APPLICABLE and (
+            not is_required or step_name == "invalid"
+        ):
+            # Untestable invalid-transitions (buttons-only UI, no skippable
+            # option) never fail the run: an unexpressible invalid path is
+            # not a defect. Coverage still records the criterion UNVERIFIED.
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.SKIPPED,
+                required=False, detail=f"Not executed: {step.detail}",
+                latency_s=latency,
+            ))
+        elif step.status == BrowserStepStatus.NOT_APPLICABLE:
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.FAIL,
+                required=True,
+                detail=f"Required workflow missing in app: {step.detail}", latency_s=latency,
+            ))
+        elif step.status == BrowserStepStatus.BLOCKED and is_required:
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.FAIL,
+                required=True, detail=f"Blocked, could not execute: {step.detail}",
+                latency_s=latency,
+            ))
+        elif step.status == BrowserStepStatus.BLOCKED:
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.SKIPPED,
+                required=False, detail=f"Blocked, could not execute: {step.detail}",
+                latency_s=latency,
+            ))
+        else:
+            if is_required:
+                checks.append(VerificationCheck(
+                    name=check_name, category=category, status=CheckStatus.FAIL,
+                    required=True, detail=f"Real browser: {step.detail}", latency_s=latency,
+                ))
+            else:
+                checks.append(VerificationCheck(
+                    name=check_name, category=category, status=CheckStatus.SKIPPED,
+                    required=False,
+                    detail=f"Failed but not required by acceptance criteria: {step.detail}",
+                    latency_s=latency,
+                ))
+    return checks
+
+
+def unavailable_browser_checks(required: dict[str, bool], reason: str) -> list[VerificationCheck]:
+    return [
+        VerificationCheck(
+            name=check_name,
+            category=CheckCategory.RUNTIME if step == "load" else CheckCategory.FUNCTIONAL,
+            status=CheckStatus.UNAVAILABLE,
+            required=required.get(step, step == "load"),
+            detail=f"Browser unavailable: {reason}",
+        )
+        for step, check_name in STEP_CHECK_NAMES.items()
+    ]
+
+
+def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
+    """Upload and run the FIELD-owned workflow script in the sandbox."""
+    started = time.perf_counter()
+    marker = f"BROWSER-{int(time.time())}"
+    sbx.files.write(BROWSER_SCRIPT_PATH, BROWSER_SCRIPT)
+    try:
+        result = sbx.commands.run(
+            f"python3 {BROWSER_SCRIPT_PATH} {base_url} {marker}",
+            timeout=300,
+        )
+    except Exception as exc:  # noqa: BLE001 - SDK raises on timeout/non-zero
+        return BrowserTestResult(
+            available=False,
+            error=f"Browser script did not complete: {type(exc).__name__}: {exc}"[:800],
+            latency_s=round(time.perf_counter() - started, 1),
+        )
+    report = None
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("BROWSER_JSON:"):
+            try:
+                report = json.loads(line[len("BROWSER_JSON:"):])
+            except ValueError:
+                report = None
+    if not isinstance(report, dict) or not isinstance(report.get("steps"), list):
+        return BrowserTestResult(
+            available=False,
+            error=f"No machine-readable browser report. stdout tail: {(result.stdout or '')[-500:]}",
+            latency_s=round(time.perf_counter() - started, 1),
+        )
+    steps: list[BrowserStep] = []
+    for entry in report["steps"]:
+        try:
+            steps.append(BrowserStep(
+                name=str(entry.get("name", "?")),
+                status=BrowserStepStatus(str(entry.get("status", "fail"))),
+                detail=str(entry.get("detail", ""))[:800],
+                duration_ms=int(entry.get("duration_ms", 0) or 0),
+            ))
+        except (ValueError, TypeError, AttributeError):
+            steps.append(BrowserStep(name="?", status=BrowserStepStatus.FAIL,
+                                     detail="Malformed step entry in browser report."))
+    screenshots: list[BrowserScreenshot] = []
+    for shot in report.get("screenshots", []) or []:
+        name = str(shot.get("name", "?"))
+        path = str(shot.get("path", ""))
+        data_url = ""
+        if path:
+            try:
+                raw = bytes(sbx.files.read(path, format="bytes"))
+                if raw:
+                    data_url = "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+            except Exception:  # noqa: BLE001 - screenshot loss must not fail the run
+                data_url = ""
+        screenshots.append(BrowserScreenshot(name=name, data_url=data_url))
+    return BrowserTestResult(
+        available=True,
+        browser=str(report.get("browser", ""))[:100],
+        steps=steps,
+        screenshots=screenshots,
+        latency_s=round(time.perf_counter() - started, 1),
+    )

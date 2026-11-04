@@ -1,0 +1,4 @@
+# Smoke-test-only dependencies. Install into the backend venv:
+#   backend/.venv/bin/pip install -r scripts/smoke/requirements.txt
+# httpx is already provided by backend/requirements.txt.
+e2b
