@@ -13,6 +13,7 @@ from app.models.verification import (
     summarize_e2b,
 )
 from app.services.browser_workflow import (
+    BROWSER_ASSERT_SOURCE,
     BROWSER_SCRIPT,
     browser_steps_to_checks,
     determine_required_steps,
@@ -170,3 +171,78 @@ def test_coverage_uses_browser_evidence() -> None:
     assert all(m.status.value == "supported" for m in mappings.values())
     assert "browser_creates_order" in mappings[BUILD_CRITERIA[1]].by_checks
     assert "browser_persists_after_reload" in mappings[BUILD_CRITERIA[3]].by_checks
+
+
+def _assert_helpers():
+    """The exact assertion logic shipped to E2B (single source of truth)."""
+    namespace: dict = {}
+    exec(BROWSER_ASSERT_SOURCE, namespace)
+    return namespace
+
+
+def test_assert_source_compiles_and_is_used_by_script() -> None:
+    compile(BROWSER_ASSERT_SOURCE, "browser_assert.py", "exec")
+    compile(BROWSER_SCRIPT, "browser_workflow.check.py", "exec")
+    assert "from browser_assert import" in BROWSER_SCRIPT
+    for helper in (
+        "parse_button_target",
+        "display_text_without_buttons",
+        "status_shown_in_display",
+        "button_moved_past",
+    ):
+        assert helper in BROWSER_SCRIPT
+
+
+def test_exact_status_badge_counts_as_shown() -> None:
+    helpers = _assert_helpers()
+    display = helpers["display_text_without_buttons"](
+        "BROWSER-1\nTicket #1\nPreparing\nAdvance to Ready", ["Advance to Ready"])
+    assert helpers["status_shown_in_display"](display, "Preparing") is True
+
+
+def test_prefixed_status_text_counts_as_shown() -> None:
+    """Regression: 'Status: Preparing' rendering (mission f30ec35cdc49) must pass."""
+    helpers = _assert_helpers()
+    display = helpers["display_text_without_buttons"](
+        "ID order-1 Ticket #1 BROWSER-1 Status: Preparing Advance to Ready",
+        ["Advance to Ready"],
+    )
+    assert helpers["status_shown_in_display"](display, "Preparing") is True
+    assert helpers["status_shown_in_display"](display, "Ready") is False
+
+
+def test_control_wording_cannot_fake_status_display() -> None:
+    """A placebo button naming the target must not satisfy the display check."""
+    helpers = _assert_helpers()
+    display = helpers["display_text_without_buttons"](
+        "ID order-1 Ticket #1 BROWSER-1 Status: Received Advance to Preparing",
+        ["Advance to Preparing"],
+    )
+    assert helpers["status_shown_in_display"](display, "Preparing") is False
+    assert helpers["status_shown_in_display"](display, "Received") is True
+
+
+def test_status_match_uses_whole_words() -> None:
+    helpers = _assert_helpers()
+    shown = helpers["status_shown_in_display"]
+    assert shown("Already queued", "Ready") is False
+    assert shown("Status: preparing", "Preparing") is False
+    assert shown("Ready - Pickup Shelf (1)", "Ready") is True
+    assert shown("", "Received") is False
+    assert shown("Status: Received", "") is False
+
+
+def test_button_target_parsing() -> None:
+    parse = _assert_helpers()["parse_button_target"]
+    assert parse("Advance to Preparing") == "Preparing"
+    assert parse("Mark Ready") == "Ready"
+    assert parse("Next") is None
+    assert parse("") is None
+
+
+def test_button_moved_past_reached_status() -> None:
+    moved_past = _assert_helpers()["button_moved_past"]
+    assert moved_past(["Advance to Ready"], "Preparing") is True
+    assert moved_past(["Advance to Preparing"], "Preparing") is False
+    assert moved_past([], "Completed") is True  # terminal: no control left
+    assert moved_past(["Advance to Completed", "Advance to Ready"], "Ready") is False

@@ -29,6 +29,7 @@ from app.models.verification import (
 )
 
 BROWSER_SCRIPT_PATH = "/tmp/browser_workflow.check.py"
+BROWSER_ASSERT_PATH = "/tmp/browser_assert.py"
 SCREENSHOT_JPG_QUALITY = 60
 
 CREATE_KEYWORDS = ("create", "add", "new order", "entry", "submit", "form")
@@ -44,12 +45,64 @@ STEP_CHECK_NAMES = {
     "persist": "browser_persists_after_reload",
 }
 
+BROWSER_ASSERT_SOURCE = r'''
+"""Status-display assertions for the E2B browser script (single source of truth).
+
+The button-branch checks must accept any contract-compliant status rendering
+(a bare badge OR prefixed text such as "Status: Preparing") while never
+letting control wording fake status evidence: a placebo "Advance to X"
+button that changes nothing must still fail.
+"""
+import re
+
+
+def parse_button_target(button_name):
+    """Target status stated by an advance control ('Advance to Preparing' -> 'Preparing')."""
+    match = re.search(r"(?:to|mark)\s+(.+)$", button_name or "", re.I)
+    return match.group(1).strip() if match else None
+
+
+def display_text_without_buttons(item_text, button_texts):
+    """Item text with control labels removed so buttons cannot fake status evidence."""
+    display = item_text or ""
+    for text in button_texts or []:
+        if text:
+            display = display.replace(text, " ")
+    return display
+
+
+def status_shown_in_display(display_text, expected):
+    """Expected status appears as a whole word in non-control display text."""
+    if not expected:
+        return False
+    return re.search(r"\b" + re.escape(expected) + r"\b", display_text or "") is not None
+
+
+def button_moved_past(button_names_after, expected):
+    """No remaining advance control still targets the reached status.
+
+    Terminal states (no advance control left) count as moved past. This is
+    only ever a secondary signal; the display check above is the proof.
+    """
+    for name in button_names_after or []:
+        if parse_button_target(name) == expected:
+            return False
+    return True
+'''
+
 BROWSER_SCRIPT = r'''
 """FIELD-owned restaurant workflow test. argv: url marker. Prints BROWSER_JSON line."""
 import json
 import re
 import sys
 import time
+
+from browser_assert import (
+    button_moved_past,
+    display_text_without_buttons,
+    parse_button_target,
+    status_shown_in_display,
+)
 
 URL, MARKER = sys.argv[1], sys.argv[2]
 ADVANCE_BUTTON = re.compile("advance|next|move|mark|progress|forward", re.I)
@@ -222,19 +275,33 @@ def main():
                                 if btn.count() == 0:
                                     raise AssertionError("no advance button for next transition")
                                 name = (btn.get_attribute("aria-label") or btn.inner_text() or "").strip()
-                                match = re.search(r"(?:to|mark)\s+(.+)$", name, re.I)
-                                if not match:
+                                expected = parse_button_target(name)
+                                if not expected:
                                     raise AssertionError(f"advance button does not state next status: {name!r}")
-                                expected = match.group(1).strip()
                                 btn.click()
                                 page.wait_for_timeout(400)
                                 item = page.locator("li", has_text=identifier).first
-                                if item.get_by_text(expected, exact=True).count() == 0:
+                                display = display_text_without_buttons(
+                                    item.inner_text() or "",
+                                    [t for t in item.get_by_role("button").all_inner_texts() if t],
+                                )
+                                if not status_shown_in_display(display, expected):
                                     raise AssertionError(f"status {expected!r} not shown after advance")
+                                after_names = []
+                                for after_btn in item.get_by_role("button", name=ADVANCE_BUTTON).all():
+                                    try:
+                                        after_names.append(
+                                            (after_btn.get_attribute("aria-label")
+                                             or after_btn.inner_text() or "").strip()
+                                        )
+                                    except Exception:
+                                        pass
+                                if not button_moved_past(after_names, expected):
+                                    raise AssertionError(f"control still targets {expected!r} after advance")
                                 chain.append(expected)
                             last_status = chain[-1]
                             rec("advance", "pass",
-                                f"buttons: status advanced twice (… -> {' -> '.join(chain)}), badges verified",
+                                f"buttons: status advanced twice (… -> {' -> '.join(chain)}), display verified",
                                 (timed() - t0) * 1000)
                     shot(page, "advanced")
         except AssertionError as exc:
@@ -310,7 +377,11 @@ def main():
                     if sel.count() > 0:
                         ok = sel.input_value() == last_status
                     else:
-                        ok = item.get_by_text(last_status, exact=True).count() > 0
+                        display = display_text_without_buttons(
+                            item.inner_text() or "",
+                            [t for t in item.get_by_role("button").all_inner_texts() if t],
+                        )
+                        ok = status_shown_in_display(display, last_status)
                     if ok:
                         rec("persist", "pass", f"order + {last_status} status survived reload", (timed() - t0) * 1000)
                     else:
@@ -439,6 +510,7 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     """Upload and run the FIELD-owned workflow script in the sandbox."""
     started = time.perf_counter()
     marker = f"BROWSER-{int(time.time())}"
+    sbx.files.write(BROWSER_ASSERT_PATH, BROWSER_ASSERT_SOURCE)
     sbx.files.write(BROWSER_SCRIPT_PATH, BROWSER_SCRIPT)
     try:
         result = sbx.commands.run(
