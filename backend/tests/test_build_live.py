@@ -108,7 +108,13 @@ def test_live_approved_to_verified(tmp_path) -> None:
     assert browser_checks["browser_creates_order"].status.value == "pass"
     assert browser_checks["browser_advances_status"].status.value == "pass"
     assert browser_checks["browser_persists_after_reload"].status.value == "pass"
-    assert browser_checks["browser_rejects_invalid"].status.value == "skipped"
+    # The seeded criteria never demand invalid-transition rejection: whatever a
+    # generation reports here (fail for permissive selects, skipped for
+    # buttons-only), it must stay non-gating (e2b.passed above already held).
+    assert browser_checks["browser_rejects_invalid"].required is False
+    assert browser_checks["browser_rejects_invalid"].status.value in ("fail", "skipped")
+    assert "browser_console_clean" in browser_checks
+    assert "browser_responsive_layout" in browser_checks
     shots = [s for s in verification.e2b.browser.screenshots if s.data_url]
     assert len(shots) >= 2
 

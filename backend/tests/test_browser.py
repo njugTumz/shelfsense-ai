@@ -38,7 +38,7 @@ BUILD_CRITERIA = [
 
 
 def _report(*statuses: str) -> BrowserTestResult:
-    names = ("load", "create", "advance", "invalid", "persist")
+    names = ("load", "create", "advance", "invalid", "persist", "console", "responsive")
     return BrowserTestResult(
         available=True,
         browser="firefox test",
@@ -58,18 +58,24 @@ def test_browser_script_compiles_and_fills_all_fields() -> None:
 
 def test_applicability_from_criteria() -> None:
     demo = determine_required_steps(DEMO_CRITERIA)
-    assert demo == {"load": True, "create": False, "advance": True, "invalid": True, "persist": False}
+    assert demo == {"load": True, "create": False, "advance": True, "invalid": True, "persist": False,
+                    "console": False, "responsive": False}
     build = determine_required_steps(BUILD_CRITERIA)
-    assert build == {"load": True, "create": True, "advance": True, "invalid": False, "persist": True}
+    assert build == {"load": True, "create": True, "advance": True, "invalid": False, "persist": True,
+                     "console": False, "responsive": False}
     assert determine_required_steps([]) == {
         "load": True, "create": False, "advance": False, "invalid": False, "persist": False,
+        "console": False, "responsive": False,
     }
     assert determine_required_steps(None)["load"] is True
+    # Quality signals never gate the verdict, whatever the criteria demand.
+    assert determine_required_steps(BUILD_CRITERIA)["console"] is False
+    assert determine_required_steps(BUILD_CRITERIA)["responsive"] is False
 
 
 def test_all_pass_maps_to_pass() -> None:
     required = determine_required_steps(BUILD_CRITERIA)
-    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 5), required)}
+    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 7), required)}
     assert checks["browser_loads_app"].status == CheckStatus.PASS
     assert checks["browser_creates_order"].status == CheckStatus.PASS
     assert checks["browser_creates_order"].required is True
@@ -80,11 +86,12 @@ def test_all_pass_maps_to_pass() -> None:
 
 def test_skip_never_counts_as_pass() -> None:
     required = determine_required_steps(DEMO_CRITERIA)
-    report = _report("pass", "not_applicable", "pass", "pass", "fail")
+    report = _report("pass", "not_applicable", "pass", "pass", "fail", "pass", "pass")
     checks = {c.name: c for c in browser_steps_to_checks(report, required)}
     assert checks["browser_creates_order"].status == CheckStatus.SKIPPED
     assert checks["browser_creates_order"].required is False
-    assert checks["browser_persists_after_reload"].status == CheckStatus.SKIPPED
+    # Executed and failed, but not demanded: FAIL status, still non-gating.
+    assert checks["browser_persists_after_reload"].status == CheckStatus.FAIL
     assert checks["browser_persists_after_reload"].required is False
     assert summarize_e2b(list(checks.values())) is True
 
@@ -92,7 +99,7 @@ def test_skip_never_counts_as_pass() -> None:
 def test_required_missing_workflow_fails() -> None:
     required = determine_required_steps(BUILD_CRITERIA)
     checks = {c.name: c for c in browser_steps_to_checks(
-        _report("pass", "not_applicable", "pass", "not_applicable", "pass"), required)}
+        _report("pass", "not_applicable", "pass", "not_applicable", "pass", "pass", "pass"), required)}
     assert checks["browser_creates_order"].status == CheckStatus.FAIL
     assert checks["browser_creates_order"].required is True
     assert "missing" in checks["browser_creates_order"].detail.lower()
@@ -101,12 +108,12 @@ def test_required_missing_workflow_fails() -> None:
 
 def test_required_failure_and_blocked_fail_verdict() -> None:
     required = determine_required_steps(BUILD_CRITERIA)
-    checks = browser_steps_to_checks(_report("pass", "pass", "fail", "not_applicable", "pass"), required)
+    checks = browser_steps_to_checks(_report("pass", "pass", "fail", "not_applicable", "pass", "pass", "pass"), required)
     by_name = {c.name: c for c in checks}
     assert by_name["browser_advances_status"].status == CheckStatus.FAIL
     assert summarize_e2b(checks) is False
 
-    blocked = browser_steps_to_checks(_report("fail", "blocked", "blocked", "blocked", "blocked"), required)
+    blocked = browser_steps_to_checks(_report("fail", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked"), required)
     by_blocked = {c.name: c for c in blocked}
     assert by_blocked["browser_loads_app"].status == CheckStatus.FAIL
     assert by_blocked["browser_creates_order"].status == CheckStatus.FAIL
@@ -118,7 +125,7 @@ def test_untestable_invalid_path_never_fails() -> None:
     required = determine_required_steps(DEMO_CRITERIA)
     assert required["invalid"] is True
     checks = {c.name: c for c in browser_steps_to_checks(
-        _report("pass", "not_applicable", "pass", "not_applicable", "fail"), required)}
+        _report("pass", "not_applicable", "pass", "not_applicable", "fail", "pass", "pass"), required)}
     assert checks["browser_rejects_invalid"].status == CheckStatus.SKIPPED
     assert checks["browser_rejects_invalid"].required is False
 
@@ -131,6 +138,40 @@ def test_missing_step_is_fail() -> None:
     checks = {c.name: c for c in browser_steps_to_checks(report, required)}
     assert checks["browser_creates_order"].status == CheckStatus.FAIL
     assert "missing from report" in checks["browser_creates_order"].detail
+
+
+def test_quality_steps_map_to_non_gating_checks() -> None:
+    from app.models.verification import CheckCategory
+
+    required = determine_required_steps(BUILD_CRITERIA)
+    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 7), required)}
+    for name in ("browser_console_clean", "browser_responsive_layout"):
+        assert checks[name].status == CheckStatus.PASS
+        assert checks[name].required is False
+        assert checks[name].category == CheckCategory.QUALITY
+
+    failed = {c.name: c for c in browser_steps_to_checks(
+        _report("pass", "pass", "pass", "not_applicable", "pass", "fail", "fail"), required)}
+    assert failed["browser_console_clean"].status == CheckStatus.FAIL
+    assert failed["browser_console_clean"].required is False
+    assert failed["browser_responsive_layout"].status == CheckStatus.FAIL
+    assert failed["browser_responsive_layout"].required is False
+    assert "Real browser" in failed["browser_console_clean"].detail
+    assert summarize_e2b(list(failed.values())) is True
+
+
+def test_browser_script_captures_console_and_viewport() -> None:
+    compile(BROWSER_SCRIPT, "browser_workflow.check.py", "exec")
+    assert 'page.on("console"' in BROWSER_SCRIPT
+    assert 'page.on("pageerror"' in BROWSER_SCRIPT
+    assert "set_viewport_size" in BROWSER_SCRIPT
+    assert "scrollWidth" in BROWSER_SCRIPT
+    assert '"mobile"' in BROWSER_SCRIPT
+    assert '"console"' in BROWSER_SCRIPT
+    assert '"responsive"' in BROWSER_SCRIPT
+    assert "set_default_timeout(60000)" in BROWSER_SCRIPT
+    assert "def fresh_load" in BROWSER_SCRIPT
+    assert "firefox_user_prefs" in BROWSER_SCRIPT
 
 
 def test_unavailable_browser_marks_required_unavailable() -> None:

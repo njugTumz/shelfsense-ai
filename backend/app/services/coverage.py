@@ -22,6 +22,7 @@ from app.models.generation import (
 )
 from app.models.interview import StructuredRequirements
 from app.models.verification import CheckStatus, E2BVerification
+from app.services.architecture import classify_architecture
 
 _STOPWORDS = frozenset({
     "allow", "allows", "display", "displays", "show", "shows", "shown",
@@ -147,4 +148,5 @@ def build_coverage_report(
     return CoverageReport(
         requirements=evaluate_feature_coverage(spec, output),
         acceptance=evaluate_acceptance_criteria(spec, e2b),
+        architecture=classify_architecture(spec, output),
     )

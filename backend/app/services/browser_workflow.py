@@ -8,8 +8,11 @@ required-by-spec workflows that are missing or broken FAIL; workflows
 the spec never asks for SKIP (never pass).
 
 Workflow ``restaurant``: load -> create -> advance x2 -> invalid ->
-reload/persist. Other workflows can be added as new scripts; the
-report/check mapping stays shared.
+reload/persist -> responsive -> console. The console and responsive steps
+are quality signals: they report honestly but never gate the verdict, so
+older applications keep their behavior on re-verification. Other
+workflows can be added as new scripts; the report/check mapping stays
+shared.
 """
 
 from __future__ import annotations
@@ -43,6 +46,8 @@ STEP_CHECK_NAMES = {
     "advance": "browser_advances_status",
     "invalid": "browser_rejects_invalid",
     "persist": "browser_persists_after_reload",
+    "console": "browser_console_clean",
+    "responsive": "browser_responsive_layout",
 }
 
 BROWSER_ASSERT_SOURCE = r'''
@@ -130,6 +135,26 @@ def main():
     def timed():
         return time.time()
 
+    def fresh_load():
+        """Reload the page, falling back to a fresh navigation of the same
+        URL when the reload itself wedges (observed as 60s stalls or
+        NS_BINDING_ABORTED after an earlier aborted navigation). Both paths
+        execute a full page load against the same origin store, so
+        persistence assertions keep their meaning; the detail records which
+        path ran. Returns "reload" or "navigated"; raises on total failure.
+        """
+        try:
+            page.reload(wait_until="load")
+            return "reload"
+        except Exception:
+            try:
+                page.evaluate("() => window.stop()")
+            except Exception:
+                pass
+            page.wait_for_timeout(1000)
+            page.goto(URL, wait_until="load")
+            return "navigated"
+
     def fill_create_form(scope, marker):
         """Fill every fillable control so realistic multi-field forms submit.
 
@@ -179,9 +204,21 @@ def main():
         return counts
 
     with sync_playwright() as pw:
-        browser = pw.firefox.launch()
+        # E2B sandboxes have ~473MB RAM with vite + driver resident: keep
+        # Firefox lean (single content process, no memory cache) so the
+        # browser survives a full workflow run on realistic pages.
+        browser = pw.firefox.launch(firefox_user_prefs={
+            "dom.ipc.processCount": 1,
+            "browser.cache.memory.enable": False,
+        })
         page = browser.new_page(viewport={"width": 1280, "height": 720})
-        page.set_default_timeout(15000)
+        # Firefox in E2B loads vite apps slowly (healthy loads observed at
+        # 13s+); 15s wrongly failed healthy apps, so allow a full minute.
+        page.set_default_timeout(60000)
+        console_errors = []
+        page.on("console", lambda msg: console_errors.append(msg.text[:300])
+                if msg.type == "error" else None)
+        page.on("pageerror", lambda exc: console_errors.append(str(exc)[:300]))
         version = browser.version
         try:
             t0 = timed()
@@ -191,7 +228,7 @@ def main():
             rec("load", "pass", f"loaded; heading: {heading}", (timed() - t0) * 1000)
         except Exception as exc:
             rec("load", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
-            for name in ("create", "advance", "invalid", "persist"):
+            for name in ("create", "advance", "invalid", "persist", "console", "responsive"):
                 rec(name, "blocked", "page did not load")
             return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
 
@@ -315,7 +352,7 @@ def main():
             if identifier is None:
                 rec("invalid", "blocked", "no order identifier available", (timed() - t0) * 1000)
             else:
-                page.reload(wait_until="load")
+                fresh_load()
                 page.locator("h1").first.wait_for(state="visible")
                 item = page.locator("li", has_text=identifier).first
                 sel = item.locator("select").first if item.count() else None
@@ -367,7 +404,7 @@ def main():
             if identifier is None:
                 rec("persist", "blocked", "no order identifier available", (timed() - t0) * 1000)
             else:
-                page.reload(wait_until="load")
+                via = fresh_load()
                 page.locator("h1").first.wait_for(state="visible")
                 item = page.locator("li", has_text=identifier).first
                 if item.count() == 0:
@@ -383,13 +420,48 @@ def main():
                         )
                         ok = status_shown_in_display(display, last_status)
                     if ok:
-                        rec("persist", "pass", f"order + {last_status} status survived reload", (timed() - t0) * 1000)
+                        rec("persist", "pass", f"order + {last_status} status survived reload ({via})",
+                            (timed() - t0) * 1000)
                     else:
                         rec("persist", "fail", f"order present but {last_status} status lost after reload",
                             (timed() - t0) * 1000)
                 shot(page, "reloaded")
         except Exception as exc:
             rec("persist", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
+        # --- responsive: mobile viewport loads without horizontal overflow ---
+        t0 = timed()
+        try:
+            page.set_viewport_size({"width": 390, "height": 844})
+            via = fresh_load()
+            page.locator("h1").first.wait_for(state="visible")
+            overflow = page.evaluate(
+                "() => document.documentElement.scrollWidth"
+                " - document.documentElement.clientWidth"
+            )
+            shot(page, "mobile")
+            if overflow and overflow > 1:
+                rec("responsive", "fail",
+                    f"horizontal overflow at 390px (over by {overflow}px)",
+                    (timed() - t0) * 1000)
+            else:
+                rec("responsive", "pass",
+                    f"390px viewport loads with no horizontal overflow ({via})",
+                    (timed() - t0) * 1000)
+        except Exception as exc:
+            rec("responsive", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
+        # --- console: no runtime errors anywhere in the run ---
+        t0 = timed()
+        if console_errors:
+            uniq = list(dict.fromkeys(console_errors))[:3]
+            rec("console", "fail",
+                f"{len(console_errors)} console error(s): {'; '.join(uniq)}"[:500],
+                (timed() - t0) * 1000)
+        else:
+            rec("console", "pass",
+                "no console errors or page errors during workflow",
+                (timed() - t0) * 1000)
 
         browser.close()
         return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
@@ -403,7 +475,8 @@ except Exception as exc:  # never exit without a machine-readable report
     report = {"browser": "firefox (crashed)", "steps": [
         {"name": n, "status": "fail" if n == "load" else "blocked",
          "detail": f"runner crashed: {traceback.format_exc(limit=3)[-500:]}", "duration_ms": 0}
-        for n in ("load", "create", "advance", "invalid", "persist")], "screenshots": []}
+        for n in ("load", "create", "advance", "invalid", "persist",
+                  "console", "responsive")], "screenshots": []}
 print("BROWSER_JSON:" + json.dumps(report))
 '''
 
@@ -421,6 +494,10 @@ def determine_required_steps(acceptance_criteria: list[str] | None) -> dict[str,
         "advance": mentions(ADVANCE_KEYWORDS),
         "invalid": mentions(INVALID_KEYWORDS),
         "persist": mentions(PERSIST_KEYWORDS),
+        # Quality signals: executed and reported, never verdict-gating, so
+        # re-verifying an older application cannot flip its verdict.
+        "console": False,
+        "responsive": False,
     }
 
 
@@ -434,7 +511,12 @@ def browser_steps_to_checks(
     for step_name, check_name in STEP_CHECK_NAMES.items():
         step = by_name.get(step_name)
         is_required = required.get(step_name, step_name == "load")
-        category = CheckCategory.RUNTIME if step_name == "load" else CheckCategory.FUNCTIONAL
+        if step_name == "load":
+            category = CheckCategory.RUNTIME
+        elif step_name in ("console", "responsive"):
+            category = CheckCategory.QUALITY
+        else:
+            category = CheckCategory.FUNCTIONAL
         if step is None:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.FAIL,
@@ -484,20 +566,30 @@ def browser_steps_to_checks(
                     required=True, detail=f"Real browser: {step.detail}", latency_s=latency,
                 ))
             else:
+                # Executed and failed, but not demanded by the acceptance
+                # criteria: report FAIL honestly (it ran) while staying
+                # non-gating (summarize_e2b counts required checks only).
                 checks.append(VerificationCheck(
-                    name=check_name, category=category, status=CheckStatus.SKIPPED,
+                    name=check_name, category=category, status=CheckStatus.FAIL,
                     required=False,
-                    detail=f"Failed but not required by acceptance criteria: {step.detail}",
+                    detail=f"Real browser: {step.detail} (not required by acceptance criteria)",
                     latency_s=latency,
                 ))
     return checks
 
 
 def unavailable_browser_checks(required: dict[str, bool], reason: str) -> list[VerificationCheck]:
+    def category_for(step: str):
+        if step == "load":
+            return CheckCategory.RUNTIME
+        if step in ("console", "responsive"):
+            return CheckCategory.QUALITY
+        return CheckCategory.FUNCTIONAL
+
     return [
         VerificationCheck(
             name=check_name,
-            category=CheckCategory.RUNTIME if step == "load" else CheckCategory.FUNCTIONAL,
+            category=category_for(step),
             status=CheckStatus.UNAVAILABLE,
             required=required.get(step, step == "load"),
             detail=f"Browser unavailable: {reason}",
@@ -513,9 +605,11 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     sbx.files.write(BROWSER_ASSERT_PATH, BROWSER_ASSERT_SOURCE)
     sbx.files.write(BROWSER_SCRIPT_PATH, BROWSER_SCRIPT)
     try:
+        # Generous ceiling: page ops already time out individually at 60s;
+        # this only bounds a wedged runner under very slow infrastructure.
         result = sbx.commands.run(
             f"python3 {BROWSER_SCRIPT_PATH} {base_url} {marker}",
-            timeout=300,
+            timeout=600,
         )
     except Exception as exc:  # noqa: BLE001 - SDK raises on timeout/non-zero
         return BrowserTestResult(

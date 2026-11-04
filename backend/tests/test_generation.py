@@ -103,6 +103,7 @@ def test_manifest_rejects_unsafe_paths() -> None:
     assert validate_manifest([_file("src/noext", "x"), _file()])
     assert validate_manifest([_file("src/main.tsx", "x"), _file()])
     assert validate_manifest([_file("src/vite-env.d.ts", "x"), _file()])
+    assert validate_manifest([_file("src/index.css", "x"), _file()])
 
 
 def test_manifest_rejects_duplicates_missing_and_empty() -> None:
@@ -119,6 +120,123 @@ def test_manifest_rejects_excessive_output() -> None:
     assert validate_manifest([_file(content="x" * 20_001)])
     big = [_file(f"src/f{i}.tsx", "x" * 18_000) for i in range(7)] + [_file()]
     assert validate_manifest(big)
+
+
+def test_manifest_import_allowlist() -> None:
+    allowed = [
+        'import { useState } from "react";',
+        'import type { ReactNode } from "react";',
+        'import { ChefHat } from "lucide-react";',
+        'import App from "./App";',
+        'import "./app.css";',
+        "export { helper } from '../lib/rules';",
+        "export default function App() { return null; }",
+    ]
+    for snippet in allowed:
+        assert validate_manifest([_file(content=snippet)]) == [], snippet
+    for snippet in (
+        'import axios from "axios";',
+        'import { x } from "react-router-dom";',
+        'import moment from "moment";',
+        'export { a } from "zustand";',
+        "const fs = require(\"fs\");",
+        'import x from "@sentry/react";',
+        'const m = await import("axios");',
+    ):
+        errors = validate_manifest([_file(content=snippet)])
+        assert any("disallowed import" in e for e in errors), snippet
+
+
+def test_manifest_enforces_lib_purity() -> None:
+    pure = "export function next(a) { return a; }"
+    assert validate_manifest([_file("src/lib/rules.js", pure), _file()]) == []
+    impure = 'import { x } from "react";\nexport function f() { return x; }'
+    errors = validate_manifest([_file("src/lib/rules.js", impure), _file()])
+    assert any("lib purity" in e for e in errors), errors
+    typed = 'import type { Order } from "../data/orders";\nexport function f(o) { return o; }'
+    assert validate_manifest([_file("src/lib/rules.js", typed), _file()]) == []
+    type_bad = 'import type { X } from "axios";\nexport function f(o) { return o; }'
+    errors = validate_manifest([_file("src/lib/rules.js", type_bad), _file()])
+    assert any("disallowed import" in e for e in errors), errors
+    gate = ('export function canTransition(from, to) {\n'
+            '  if (from === "Received") return to === "Preparing";\n'
+            "  return false;\n}")
+    assert validate_manifest([_file("src/lib/rules.js", gate), _file()]) == []
+    # Storage importing the domain rules (intra-lib) is the blessed pattern.
+    sibling = 'import { canTransition } from "./rules";\nexport function save(o) { return o; }'
+    assert validate_manifest([_file("src/lib/storage.js", sibling), _file()]) == []
+    nested = 'import { x } from "../rules";\nexport function f() { return x; }'
+    assert validate_manifest([_file("src/lib/deep/mod.js", nested), _file()]) == []
+    # …but lib must not reach outside itself or touch packages/require.
+    escape = 'import { x } from "../components/App";\nexport function f() { return x; }'
+    errors = validate_manifest([_file("src/lib/storage.js", escape), _file()])
+    assert any("lib purity" in e for e in errors), errors
+    required = 'const x = require("./rules");\nmodule.exports = { x };'
+    errors = validate_manifest([_file("src/lib/storage.js", required), _file()])
+    assert any("lib purity" in e for e in errors), errors
+
+
+def test_oversized_file_triggers_single_recovery_retry(monkeypatch) -> None:
+    from app.services import developer as developer_module
+    from app.services.developer import generate_application
+
+    spec = _spec()
+    big = "x" * 20_001
+    calls = []
+
+    def fake_responses(**kwargs):
+        calls.append(kwargs["input_text"])
+        if len(calls) == 1:
+            files = [{"path": "src/App.tsx", "content": "ok"},
+                     {"path": "src/Big.tsx", "content": big}]
+        else:
+            files = [{"path": "src/App.tsx", "content": "ok"},
+                     {"path": "src/BigA.tsx", "content": "a"},
+                     {"path": "src/BigB.tsx", "content": "b"}]
+        return ({"summary": "s", "files": files, "feature_map": [],
+                 "unimplemented": [], "assumptions": []}, {})
+
+    monkeypatch.setattr(developer_module, "responses_structured", fake_responses)
+    output, _, _ = generate_application(spec)
+    assert len(calls) == 2
+    assert "modular" in calls[1].lower() or "decompos" in calls[1].lower()
+    assert sorted(f.path for f in output.files) == ["src/App.tsx", "src/BigA.tsx", "src/BigB.tsx"]
+
+
+def test_oversized_recovery_gives_up_after_one_retry(monkeypatch) -> None:
+    from app.services import developer as developer_module
+    from app.services.developer import GenerationValidationError, generate_application
+
+    calls = []
+
+    def always_big(**kwargs):
+        calls.append(1)
+        return ({"summary": "s",
+                 "files": [{"path": "src/App.tsx", "content": "x" * 20_001}],
+                 "feature_map": [], "unimplemented": [], "assumptions": []}, {})
+
+    monkeypatch.setattr(developer_module, "responses_structured", always_big)
+    with pytest.raises(GenerationValidationError):
+        generate_application(_spec())
+    assert len(calls) == 2
+
+
+def test_other_manifest_errors_do_not_trigger_recovery(monkeypatch) -> None:
+    from app.services import developer as developer_module
+    from app.services.developer import GenerationValidationError, generate_application
+
+    calls = []
+
+    def bad_import(**kwargs):
+        calls.append(1)
+        return ({"summary": "s",
+                 "files": [{"path": "src/App.tsx", "content": 'import x from "axios";'}],
+                 "feature_map": [], "unimplemented": [], "assumptions": []}, {})
+
+    monkeypatch.setattr(developer_module, "responses_structured", bad_import)
+    with pytest.raises(GenerationValidationError):
+        generate_application(_spec())
+    assert len(calls) == 1
 
 
 def test_manifest_rejects_forbidden_content() -> None:
@@ -384,3 +502,24 @@ def test_generate_application_rejects_invalid_manifest_structure(monkeypatch) ->
     monkeypatch.setattr(developer_module, "responses_structured", fake_responses)
     with pytest.raises(GenerationValidationError, match="unsafe path"):
         generate_application(_spec())
+
+
+PROMPT_ANCHORS = (
+    "ARCHITECTURE CONTRACT",
+    "canTransition",
+    "src/lib/storage",
+    "import type",
+    "DESIGN CONTRACT",
+    "Tailwind-first",
+    "Anything else is rejected",
+)
+
+
+@pytest.mark.parametrize("prompt_name", ["DEVELOPER_SYSTEM", "REPAIR_SYSTEM"])
+def test_prompt_contract_anchors_present(prompt_name):
+    prompt = getattr(developer_module, prompt_name)
+    for anchor in PROMPT_ANCHORS:
+        assert anchor in prompt, (prompt_name, anchor)
+    # The old blanket ban contradicts the contract (import type + intra-lib
+    # imports are allowed); it must never reappear in either prompt.
+    assert "no imports" not in prompt, prompt_name

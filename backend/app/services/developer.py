@@ -14,7 +14,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.core.config import get_settings
-from app.models.generation import GenerationOutput, validate_manifest
+from app.models.generation import (
+    MAX_FILE_CHARS,
+    GenerationOutput,
+    validate_manifest,
+)
 from app.models.interview import StructuredRequirements
 from app.services.spark_client import responses_structured
 
@@ -23,27 +27,64 @@ from app.services.spark_client import responses_structured
 #: above the 16k that truncated a production build (char ~6328 cut).
 DEVELOPER_MAX_OUTPUT_TOKENS = 32768
 
-DEVELOPER_SYSTEM = """\
-You are FIELD's developer. Implement the approved specification as a small \
-React + Vite + TypeScript single-page app. Aim for at most 12 files.
-
+#: Shared by the build and repair prompts so both describe one scaffold.
+SCAFFOLD_SPEC = """\
 FIXED SCAFFOLD (already exists — do NOT regenerate these):
-- package.json: react 18, react-dom 18, vite 5, typescript 5.5, \
-@vitejs/plugin-react. No other dependencies are installed. Import nothing else.
-- src/main.tsx: renders the default export of ./App into #root.
+- package.json: react 18, react-dom 18, lucide-react (pinned), vite 5, \
+typescript 5.5, @vitejs/plugin-react, tailwindcss v3 + postcss + \
+autoprefixer (pinned). No other dependencies are installed: import only \
+react, react-dom, lucide-react, and relative paths. Anything else is rejected.
+- src/main.tsx: imports ./index.css, renders the default export of ./App \
+into #root.
+- src/index.css: Tailwind directives (@tailwind base/components/utilities). \
+Style with Tailwind utility classes in className; do not regenerate this file.
+- tailwind.config.js + postcss.config.js: standard Tailwind v3 setup \
+scanning index.html and src/**. Use v3 utility syntax only.
 - tsconfig: strict TypeScript, allowJs, jsx react-jsx. Your code MUST \
 compile cleanly: type all props and state, no implicit any.
-- index.html has <div id="root"> and loads /src/main.tsx.
+- index.html has <div id="root"> and loads /src/main.tsx."""
 
-YOUR FILES (relative paths under src/ only):
-- src/App.tsx (REQUIRED): default-exported App component with the screens \
-and workflows. Keep all state in React (useState); localStorage is allowed.
-- src/app.css (optional): include ONLY if App.tsx imports "./app.css".
-- src/lib/*.js (encouraged for core rules): plain JavaScript, no imports, \
-imported by App.tsx (e.g. status-transition helpers). It may be executed \
-directly by tests, so keep it dependency-free and correct.
-- src/components/*.tsx, src/data/*.ts (optional): extra components, sample data.
+#: Shared engineering bar for build and repair. Proportionate modular
+#: architecture: strict boundaries, no enterprise ceremony.
+ARCHITECTURE_CONTRACT = """\
+ARCHITECTURE CONTRACT (small, modular, honest code):
+- src/lib/* holds domain rules + storage as pure modules: `import type` \
+and relative imports INSIDE src/lib/* are allowed (storage imports the \
+rules); bare packages, require(), and anything outside lib are rejected \
+(this is enforced). The rules themselves import no values.
+- ONE transition gate owns every state change: a canTransition(from, to) \
+function returning true only for a permitted transition. Every button, \
+dropdown, and handler must consult it; invalid attempts are rejected, the \
+original state is preserved, and the user sees clear feedback. Never offer \
+an action the gate would reject without also enforcing the gate underneath.
+- Constrained domain types: states are string-union types (e.g. type \
+Status = "Received" | "Preparing"), never bare strings. Derive option \
+lists and labels from the same constants the gate uses.
+- Persistence boundary: one src/lib/storage module owns load/save/validate; \
+components never touch localStorage directly and never persist rejected data.
+- Modules stay focused: one screen or panel per component file, shared \
+constants in src/data/*.ts, no giant App.tsx, no duplicated logic, no \
+circular imports, no global state beyond the top-level component."""
 
+#: Shared design bar for build and repair. Warm and professional by
+#: default; adapt the palette to the business, never to a generic template.
+DESIGN_CONTRACT = """\
+DESIGN CONTRACT (the result must look built by a professional product team):
+- Derive the screens from the spec's roles, journeys, and entities — a \
+restaurant gets order/kitchen/shelf views, a retailer gets \
+products/sales/stock, and so on. Never emit a generic dashboard.
+- Warm, sophisticated palette: warm-neutral surfaces (stone), one \
+coherent accent family (terracotta orange, amber, or moss green) with \
+real text contrast. No purple/blue gradients, no emoji icons.
+- Tailwind-first: rounded cards, consistent spacing scale, clear type \
+hierarchy (one page title, section headings, body text), subtle \
+borders/shadows, Lucide icons via lucide-react aligned with their labels.
+- Responsive mobile-first layouts: single column on phones, grids and \
+side-by-side panels from md: up. No horizontal overflow at 390px wide.
+- Every control works: validated forms, useful empty/loading/error \
+states, no dead buttons, no placeholder links, no lorem ipsum."""
+
+ACCESSIBLE_MARKUP_CONTRACT = """\
 ACCESSIBLE MARKUP CONTRACT (the app is tested by a real browser using
 accessible roles, so follow this exactly):
 - Order creation is a <form> containing one labeled text <input> and one
@@ -55,17 +96,57 @@ accessible roles, so follow this exactly):
   text, and its current status text.
 - Each order's status control is either a <label> + <select> with the
   status options, or a <button> whose accessible name states the next
-  status (e.g. "Advance to Preparing").
+  status (e.g. "Advance to Preparing")."""
+
+ARCHITECTURE_RULES = """\
+ARCHITECTURE (frontend-only application):
+- Keep all state in React (useState); localStorage is allowed only when \
+the spec's persistence need is genuinely single-device.
+- No backend, no accounts, no payments, no network calls, no routing \
+libraries, no process.env, no secrets, no child_process.
+- If a requirement genuinely needs server-side behavior (shared \
+multi-user data, accounts, real database), still build the best \
+frontend-only prototype AND list that requirement ID in unimplemented \
+with a reason starting "NEEDS_BACKEND: " describing what the server \
+must provide; add an assumption stating the prototype's limits. Never \
+claim localStorage is a production database."""
+
+DEVELOPER_SYSTEM = """\
+You are FIELD's developer. Implement the approved specification as a small, \
+polished React + Vite + TypeScript + Tailwind CSS single-page app. Aim for \
+at most 12 files.
+
+""" + SCAFFOLD_SPEC + """
+
+YOUR FILES (relative paths under src/ only):
+- src/App.tsx (REQUIRED): default-exported App component composing the \
+screens and workflows from the components below.
+- src/components/*.tsx (encouraged): one focused component per screen or \
+panel (e.g. OrderBoard, KitchenView, ShelfView); App.tsx composes them.
+- src/lib/storage.* (expected when the app persists): load/save/validate \
+helpers isolating localStorage behind the persistence boundary.
+- src/lib/*.test.* (never): no test files; FIELD verifies with real browsers.
+
+""" + ARCHITECTURE_CONTRACT + """
+- src/lib/*.js (encouraged for core rules): plain JavaScript following the \
+ARCHITECTURE CONTRACT above (e.g. status-transition helpers). It may be \
+executed directly by tests, so keep it correct.
+- src/data/*.ts (optional): sample data and constants.
+- src/app.css (discouraged): Tailwind utilities cover styling; include a \
+custom stylesheet ONLY for keyframes or print rules App.tsx cannot \
+express, and import it explicitly.
+
+""" + DESIGN_CONTRACT + """
+
+""" + ACCESSIBLE_MARKUP_CONTRACT + """
 
 RULES:
 - Implement ONLY what the spec requires; map every feature to its \
 requirement IDs in feature_map.
-- No backend, no accounts, no payments, no network calls, no routing \
-libraries, no process.env, no secrets, no child_process.
+""" + ARCHITECTURE_RULES + """
 - If a requirement cannot be implemented in this constrained app, list it \
 in unimplemented with the reason instead of faking it.
-- Reply with ONLY valid DeveloperOutput JSON.
-"""
+- Reply with ONLY valid DeveloperOutput JSON."""
 
 DEVELOPER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -116,54 +197,48 @@ DEVELOPER_SCHEMA: dict[str, Any] = {
 
 REPAIR_SYSTEM = """\
 You are FIELD's developer, repairing an app that failed verification.
-The FIXED SCAFFOLD, YOUR FILES, ACCESSIBLE MARKUP CONTRACT, and RULES
-below apply exactly as for a fresh build — you return the COMPLETE file
-set (every CURRENT SOURCE file listed below, fixed and unchanged),
-never a patch. Never return scaffold-owned files (src/main.tsx,
-src/vite-env.d.ts): they exist but are FIELD-owned, not yours.
+The FIXED SCAFFOLD, YOUR FILES, DESIGN CONTRACT, ACCESSIBLE MARKUP
+CONTRACT, and RULES below apply exactly as for a fresh build — you
+return the COMPLETE file set (every CURRENT SOURCE file listed below,
+fixed and unchanged), never a patch. Never return scaffold-owned files
+(src/main.tsx, src/vite-env.d.ts, src/index.css): they exist but are
+FIELD-owned, not yours.
 
-FIXED SCAFFOLD (already exists — do NOT regenerate these):
-- package.json: react 18, react-dom 18, vite 5, typescript 5.5, \
-@vitejs/plugin-react. No other dependencies are installed. Import nothing else.
-- src/main.tsx: renders the default export of ./App into #root.
-- tsconfig: strict TypeScript, allowJs, jsx react-jsx. Your code MUST \
-compile cleanly: type all props and state, no implicit any.
-- index.html has <div id="root"> and loads /src/main.tsx.
+""" + SCAFFOLD_SPEC + """
 
 YOUR FILES (relative paths under src/ only):
-- src/App.tsx (REQUIRED): default-exported App component with the screens \
-and workflows. Keep all state in React (useState); localStorage is allowed.
-- src/app.css (optional): include ONLY if App.tsx imports "./app.css".
-- src/lib/*.js (encouraged for core rules): plain JavaScript, no imports, \
-imported by App.tsx (e.g. status-transition helpers). It may be executed \
-directly by tests, so keep it dependency-free and correct.
-- src/components/*.tsx, src/data/*.ts (optional): extra components, sample data.
+- src/App.tsx (REQUIRED): default-exported App component composing the \
+screens and workflows from the components below.
+- src/components/*.tsx (encouraged): one focused component per screen or \
+panel; App.tsx composes them.
+- src/lib/storage.* (expected when the app persists): load/save/validate \
+helpers isolating localStorage behind the persistence boundary.
 
-ACCESSIBLE MARKUP CONTRACT (the app is tested by a real browser using
-accessible roles, so follow this exactly):
-- Order creation is a <form> containing one labeled text <input> and one
-  submit <button> (e.g. "Add Order").
-- If the spec needs extra inputs (details, type), keep them optional or
-  pre-filled: submitting the form with every visible text field filled
-  MUST immediately create an order whose <li> shows the entered text.
-- Orders render as <ul>/<li> items; each item shows its id, its items
-  text, and its current status text.
-- Each order's status control is either a <label> + <select> with the
-  status options, or a <button> whose accessible name states the next
-  status (e.g. "Advance to Preparing").
+""" + ARCHITECTURE_CONTRACT + """
+- src/lib/*.js (encouraged for core rules): plain JavaScript following the \
+ARCHITECTURE CONTRACT above. It may be executed directly by tests, so \
+keep it correct.
+- src/data/*.ts (optional): sample data and constants.
+- src/app.css (discouraged): Tailwind utilities cover styling; include a \
+custom stylesheet ONLY for keyframes or print rules App.tsx cannot \
+express, and import it explicitly.
+
+""" + DESIGN_CONTRACT + """
+
+""" + ACCESSIBLE_MARKUP_CONTRACT + """
 
 RULES:
 - Implement ONLY what the spec requires; map every feature to its \
 requirement IDs in feature_map.
-- No backend, no accounts, no payments, no network calls, no routing \
-libraries, no process.env, no secrets, no child_process.
+""" + ARCHITECTURE_RULES + """
 - If a requirement cannot be implemented in this constrained app, list it \
 in unimplemented with the reason instead of faking it.
 - Fix ONLY the observed failures listed below; keep all working behavior.
+- A repair may improve styling toward the DESIGN CONTRACT only insofar \
+as the failures demand it; never redecorate working screens.
 - Address an audit finding ONLY when you can ground it in the provided \
 sources or test results; never invent a fix for evidence you cannot see.
-- Reply with ONLY valid DeveloperOutput JSON.
-"""
+- Reply with ONLY valid DeveloperOutput JSON."""
 
 #: Repair input budgets (mirrors the auditor evidence budgets).
 REPAIR_FILE_BUDGET = 6000
@@ -177,6 +252,47 @@ class GenerationValidationError(ValueError):
     def __init__(self, reasons: list[str]):
         self.reasons = reasons
         super().__init__("; ".join(reasons) if reasons else "invalid generation output")
+
+
+def _oversized_files(files: list[GeneratedFile]) -> list[tuple[str, int]]:
+    return [(f.path, len(f.content)) for f in files if len(f.content) > MAX_FILE_CHARS]
+
+
+def _recover_oversized_manifest(
+    input_text: str,
+    files: list[GeneratedFile],
+    caller,
+) -> tuple[GenerationOutput | None, dict[str, int] | None]:
+    """One bounded recovery attempt for oversized files.
+
+    Returns (None, None) when no file exceeds the limit (caller raises its
+    original errors). Otherwise makes exactly one retry asking for modular
+    decomposition, validates the WHOLE returned manifest, and returns the
+    replacement output. Never truncates, splits blindly, drops features,
+    raises limits, or retries more than once.
+    """
+    oversized = _oversized_files(files)
+    if not oversized:
+        return None, None
+    listing = ", ".join(f"{path} ({size} chars)" for path, size in oversized)
+    data, usage = caller(
+        f"{input_text}\n\nYour previous reply was REJECTED for oversized files: "
+        f"{listing} (limit {MAX_FILE_CHARS} chars each). Do NOT truncate, "
+        f"split at arbitrary positions, or drop features. Decompose each "
+        f"oversized file into smaller focused modules (components, lib, "
+        f"data) preserving every requirement and feature, and return the "
+        f"COMPLETE corrected manifest with ONLY valid DeveloperOutput JSON."
+    )
+    try:
+        retry_output = GenerationOutput.model_validate(data)
+    except ValidationError as exc:
+        raise GenerationValidationError(
+            [f"malformed recovery output: {exc}"]
+        ) from exc
+    retry_errors = validate_manifest(retry_output.files)
+    if retry_errors:
+        raise GenerationValidationError(retry_errors)
+    return retry_output, usage
 
 
 def _render_spec(spec: StructuredRequirements) -> str:
@@ -236,7 +352,20 @@ def generate_application(
             raise GenerationValidationError([f"malformed developer output: {exc2}"]) from exc2
     manifest_errors = validate_manifest(output.files)
     if manifest_errors:
-        raise GenerationValidationError(manifest_errors)
+        recovered, retry_usage = _recover_oversized_manifest(
+            input_text,
+            output.files,
+            lambda text: responses_structured(
+                schema_name="DeveloperOutput",
+                schema=DEVELOPER_SCHEMA,
+                input_text=text,
+                effort="high",
+                max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+            ),
+        )
+        if recovered is None:
+            raise GenerationValidationError(manifest_errors)
+        output, usage = recovered, retry_usage
     return output, usage, get_settings().muse_spark_model_id
 
 
@@ -303,5 +432,18 @@ def repair_application_files(
             raise GenerationValidationError([f"malformed developer output: {exc2}"]) from exc2
     manifest_errors = validate_manifest(output.files)
     if manifest_errors:
-        raise GenerationValidationError(manifest_errors)
+        recovered, retry_usage = _recover_oversized_manifest(
+            input_text,
+            output.files,
+            lambda text: responses_structured(
+                schema_name="DeveloperOutput",
+                schema=DEVELOPER_SCHEMA,
+                input_text=text,
+                effort="high",
+                max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+            ),
+        )
+        if recovered is None:
+            raise GenerationValidationError(manifest_errors)
+        output, usage = recovered, retry_usage
     return output, usage, get_settings().muse_spark_model_id

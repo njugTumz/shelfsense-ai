@@ -64,7 +64,12 @@ def test_live_demo_verification(tmp_path) -> None:
     assert browser_checks["browser_advances_status"].status.value == "pass"
     assert browser_checks["browser_rejects_invalid"].status.value == "pass"
     assert browser_checks["browser_creates_order"].status.value == "skipped"
-    assert browser_checks["browser_persists_after_reload"].status.value == "skipped"
+    # Executed and failed, but not demanded by the demo criteria: honest
+    # FAIL that stays non-gating (the verdict below is still VERIFIED).
+    assert browser_checks["browser_persists_after_reload"].status.value == "fail"
+    assert browser_checks["browser_persists_after_reload"].required is False
+    assert "browser_console_clean" in browser_checks
+    assert "browser_responsive_layout" in browser_checks
     shots = [s for s in verification.e2b.browser.screenshots if s.data_url]
     assert len(shots) >= 2
     assert verification.audit.provider == "spark_adversarial"
