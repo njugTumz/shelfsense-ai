@@ -1,0 +1,13 @@
+.env
+.env.*
+*.db
+*.sqlite*
+*.sqlite3-journal
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+tests/
+uploads/
+media/
+Dockerfile
+.dockerignore

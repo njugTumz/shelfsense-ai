@@ -1,0 +1,6 @@
+# FIELD edge image: Caddy + baked React dist/. No secrets in this image.
+# Build context is a staging dir containing this Dockerfile, Caddyfile,
+# and the production frontend build (VITE_API_URL already baked in).
+FROM caddy:2-alpine
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY dist /srv/www

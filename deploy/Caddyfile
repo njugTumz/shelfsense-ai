@@ -1,0 +1,19 @@
+# FIELD edge: automatic HTTPS + static frontend + API reverse proxy.
+#
+# {$SITE} is the public ACI FQDN, passed as a container environment
+# variable. Caddy provisions/renews the TLS certificate automatically
+# (requires public TCP 80+443 reachability) and redirects HTTP to HTTPS.
+# The backend FastAPI container shares the group's localhost network.
+{$SITE} {
+	handle /api/* {
+		reverse_proxy localhost:8000
+	}
+	handle /health {
+		reverse_proxy localhost:8000
+	}
+	handle {
+		root * /srv/www
+		try_files {path} /index.html
+		file_server
+	}
+}
