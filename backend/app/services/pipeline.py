@@ -31,7 +31,7 @@ def _short_path(path: str) -> str:
     return path[len(APP_ROOT) + 1 :] if path.startswith(APP_ROOT + "/") else path
 
 
-def _reconstruct_output(mission: Mission) -> GenerationOutput | None:
+def reconstruct_output(mission: Mission) -> GenerationOutput | None:
     """Rebuild the developer output from stored generation + files.
 
     Lets re-verification (which rebuilds VerificationResult from scratch)
@@ -144,7 +144,7 @@ def run_mission_verification(
         completed_at=utc_now_iso(),
     )
     if mission.spec is not None:
-        output = _reconstruct_output(mission)
+        output = reconstruct_output(mission)
         if output is not None:
             mission.verification.coverage = build_coverage_report(
                 mission.spec, output, e2b

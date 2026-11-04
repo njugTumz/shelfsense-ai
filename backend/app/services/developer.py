@@ -27,6 +27,12 @@ from app.services.spark_client import responses_structured
 #: above the 16k that truncated a production build (char ~6328 cut).
 DEVELOPER_MAX_OUTPUT_TOKENS = 32768
 
+#: Read budget for generation/repair calls. High-effort reasoning plus up
+#: to 32k output tokens legitimately exceeds the 180s client default on
+#: slow runs (mission 7a4c82e0021e failed at ~181s); 600s covers the
+#: observed long tail without waiting forever on a stuck peer.
+DEVELOPER_TIMEOUT_S = 600.0
+
 #: Shared by the build and repair prompts so both describe one scaffold.
 SCAFFOLD_SPEC = """\
 FIXED SCAFFOLD (already exists — do NOT regenerate these):
@@ -331,6 +337,7 @@ def generate_application(
         input_text=input_text,
         effort="high",
         max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+        timeout_s=DEVELOPER_TIMEOUT_S,
     )
     try:
         output = GenerationOutput.model_validate(data)
@@ -345,6 +352,7 @@ def generate_application(
             ),
             effort="high",
             max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+        timeout_s=DEVELOPER_TIMEOUT_S,
         )
         try:
             output = GenerationOutput.model_validate(data)
@@ -361,6 +369,7 @@ def generate_application(
                 input_text=text,
                 effort="high",
                 max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+        timeout_s=DEVELOPER_TIMEOUT_S,
             ),
         )
         if recovered is None:
@@ -411,6 +420,7 @@ def repair_application_files(
         input_text=input_text,
         effort="high",
         max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+        timeout_s=DEVELOPER_TIMEOUT_S,
     )
     try:
         output = GenerationOutput.model_validate(data)
@@ -425,6 +435,7 @@ def repair_application_files(
             ),
             effort="high",
             max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+        timeout_s=DEVELOPER_TIMEOUT_S,
         )
         try:
             output = GenerationOutput.model_validate(data)
@@ -441,6 +452,7 @@ def repair_application_files(
                 input_text=text,
                 effort="high",
                 max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
+        timeout_s=DEVELOPER_TIMEOUT_S,
             ),
         )
         if recovered is None:

@@ -19,6 +19,9 @@ from app.models.mission import Mission, MissionStatus
 from app.services.interview import LifecycleError
 from app.services.spark_client import responses_structured
 
+#: Read budget for spec planning/generation (medium effort, 16k tokens).
+REQUIREMENTS_TIMEOUT_S = 300.0
+
 PLANNER_SYSTEM = """\
 You are FIELD's planner. Turn the business evidence and interview answers \
 into a concrete application specification for a constrained React/Vite/ \
@@ -140,6 +143,7 @@ def _generate_validated(input_text: str) -> StructuredRequirements:
             input_text=input_text,
             effort="medium",
             max_output_tokens=16384,
+            timeout_s=REQUIREMENTS_TIMEOUT_S,
         )
         return StructuredRequirements.model_validate(data)
     except ValidationError as exc:
@@ -153,6 +157,7 @@ def _generate_validated(input_text: str) -> StructuredRequirements:
             ),
             effort="medium",
             max_output_tokens=16384,
+            timeout_s=REQUIREMENTS_TIMEOUT_S,
         )
         return StructuredRequirements.model_validate(data)
 

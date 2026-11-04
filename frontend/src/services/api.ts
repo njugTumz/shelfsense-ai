@@ -66,6 +66,7 @@ export interface AuditResult {
   model_id: string;
   usage: Record<string, number>;
   error: string;
+  error_class: string;
   latency_s: number;
 }
 
@@ -111,6 +112,7 @@ export interface GenerationRecord {
   unimplemented: UnimplementedItem[];
   assumptions: string[];
   error: string;
+  error_class: string;
 }
 
 export interface RepairRecord {
@@ -383,10 +385,18 @@ export async function approveRequirements(missionId: string): Promise<Mission> {
 export async function buildApplication(
   missionId: string,
   force = false,
+  idempotencyKey?: string,
 ): Promise<Mission> {
   return request<Mission>(`/api/missions/${missionId}/build`, {
     method: "POST",
+    headers: idempotencyKey !== undefined ? { "Idempotency-Key": idempotencyKey } : {},
     body: JSON.stringify({ force }),
+  });
+}
+
+export async function cancelBuild(missionId: string): Promise<Mission> {
+  return request<Mission>(`/api/missions/${missionId}/build/cancel`, {
+    method: "POST",
   });
 }
 

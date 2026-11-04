@@ -87,6 +87,7 @@ class GenerationRecord(BaseModel):
     unimplemented: list[UnimplementedItem] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     error: str = ""
+    error_class: str = ""
 
 
 class RepairStatus(str, Enum):

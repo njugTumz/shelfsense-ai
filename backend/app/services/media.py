@@ -36,6 +36,7 @@ from app.services.interview import LifecycleError
 from app.services.spark_client import (
     SparkError,
     SparkUnavailableError,
+    http_post_with_retry,
     responses_structured_multimodal,
 )
 
@@ -45,6 +46,16 @@ TRANSCRIBE_RATE = 24000
 MAX_TRANSCRIBE_BYTES = 32_000_000
 MAX_TRANSCRIBE_SECONDS = 600
 TRANSCRIBE_MODE = "ENDPOINTING"
+
+#: Read budget for 6-frame visual analysis (low effort, but large
+#: multimodal payload and variable vision latency).
+VISION_TIMEOUT_S = 300.0
+
+#: Transcription transport: short connect, generous read for long audio,
+#: long write for multi-MB WAV uploads.
+TRANSCRIBE_CONNECT_S = 10.0
+TRANSCRIBE_READ_S = 300.0
+TRANSCRIBE_WRITE_S = 120.0
 
 VISION_SYSTEM = """\
 You are FIELD's visual analyst. Describe ONLY what is directly visible in \
@@ -289,20 +300,22 @@ def run_transcription(media: MediaRecord) -> MediaRecord:
         "mode": TRANSCRIBE_MODE,
     })
     try:
-        response = httpx.post(
+        response = http_post_with_retry(
             f"{settings.meta_model_base_url}/asr/transcribe",
+            "Transcribe",
             headers={"Authorization": f"Bearer {settings.meta_model_api_key}",
                      "Accept": "application/json"},
             files={
                 "request": (None, request_part, "application/json"),
                 "audio": (audio_path.name, audio_path.read_bytes(), "audio/wav"),
             },
-            timeout=300.0,
+            timeout=httpx.Timeout(
+                connect=TRANSCRIBE_CONNECT_S, read=TRANSCRIBE_READ_S,
+                write=TRANSCRIBE_WRITE_S, pool=TRANSCRIBE_CONNECT_S,
+            ),
         )
-    except httpx.HTTPError as exc:
-        raise MediaProcessingError(f"Transcription transport error: {type(exc).__name__}: {exc}") from exc
-    if response.status_code != 200:
-        raise MediaProcessingError(f"Transcription HTTP {response.status_code}: {response.text[:800]}")
+    except SparkError as exc:
+        raise MediaProcessingError(f"Transcription failed: {exc}") from exc
     payload = response.json()
     if "transcript" not in payload:
         raise MediaProcessingError(f"Transcription response has no transcript: {response.text[:800]}")
@@ -343,6 +356,7 @@ def run_visual_analysis(media: MediaRecord) -> MediaRecord:
         instruction=VISION_SYSTEM,
         images=images,
         effort="low",
+        timeout_s=VISION_TIMEOUT_S,
     )
     try:
         observations = [VisualObservation.model_validate(o) for o in data.get("observations", [])]

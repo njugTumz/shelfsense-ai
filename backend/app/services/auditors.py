@@ -91,6 +91,9 @@ executed test result in either direction.
 an empty findings list rather than inventing issues.
 """
 
+#: Read budget for the adversarial audit (medium effort over large evidence).
+AUDIT_TIMEOUT_S = 300.0
+
 SOURCE_FILE_BUDGET = 6000
 SOURCE_TOTAL_BUDGET = 20000
 PRIORITY_SOURCES = ("src/App.tsx", "src/lib/orderLogic.js", "package.json", "index.html")
@@ -195,6 +198,7 @@ class SparkAdversarialAuditor(Auditor):
                 schema=AUDIT_SCHEMA,
                 input_text=base_input,
                 effort="medium",
+                timeout_s=AUDIT_TIMEOUT_S,
             )
             try:
                 verdict, summary, findings = _validate_audit_payload(data)
@@ -208,6 +212,7 @@ class SparkAdversarialAuditor(Auditor):
                         f"AuditReport JSON."
                     ),
                     effort="medium",
+                timeout_s=AUDIT_TIMEOUT_S,
                 )
                 verdict, summary, findings = _validate_audit_payload(data)
         except (SparkError, KeyError, ValidationError) as exc:
@@ -217,6 +222,7 @@ class SparkAdversarialAuditor(Auditor):
                 completed=False,
                 model_id=settings.muse_spark_model_id,
                 error=f"Spark audit failed: {exc}"[:2000],
+                error_class=type(exc).__name__,
                 latency_s=round(time.perf_counter() - started, 1),
             )
         return AuditResult(

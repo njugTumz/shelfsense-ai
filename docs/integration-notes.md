@@ -212,3 +212,42 @@ ffmpeg -i input.m4a -ac 1 -ar 24000 -c:a pcm_s16le -map_metadata -1 output.wav
 
 Estimates assume Standard-mode Spark pricing (upper bound unless the
 configured model ID is a `-contributor` variant) and print before each call.
+
+## 10. Provider timeouts, retries, and jobs (verified by keyless tests)
+
+Transport uses split `httpx.Timeout`: connect 10s, pool 10s, write 60s
+(120s for WAV uploads). Read budgets per call site:
+
+| Site | Effort / output | Read budget | Constant |
+|---|---|---|---|
+| Generation + repair | high / 32k | 600s | `DEVELOPER_TIMEOUT_S` |
+| Requirements | medium / 16k | 300s | `REQUIREMENTS_TIMEOUT_S` |
+| Audit | medium / large evidence | 300s | `AUDIT_TIMEOUT_S` |
+| Interview turn | low / short | 180s | `INTERVIEW_TIMEOUT_S` |
+| Vision (6 frames) | low / multimodal | 300s | `VISION_TIMEOUT_S` |
+| Transcribe | 10MB WAV | 300s read | `TRANSCRIBE_*_S` |
+
+The 180s-previous default caused mission `7a4c82e0021e`'s generation to
+fail with `ReadTimeout` at ~181s on a healthy slow run.
+
+Retry policy (`spark_client`, shared by Responses + transcribe):
+at most 3 HTTP attempts per logical call; only `SparkTransientError`
+(timeouts, dropped peers, 408/429/5xx) retries, with exponential
+backoff (2/4/8s), uniform [delay/2, delay] jitter, and `Retry-After`
+(seconds or HTTP-date) honored as a floor. Auth (401/403),
+bad-request (other 4xx), truncation, and malformed output never retry
+at the transport layer.
+
+Error taxonomy (persisted as `error_class` on generation/audit
+records, mapped to friendly UI copy): `SparkTransientError`,
+`SparkRateLimitError`, `SparkAuthError`, `SparkBadRequestError`.
+
+Jobs: additive SQLite `jobs` table (partial unique index = at most one
+live job per mission+operation; second index = one job per
+idempotency key). `POST /build` accepts `Idempotency-Key` (replay
+returns current state); `POST /build/cancel` stops background builds
+at stage boundaries. `BUILD_ASYNC=true` enables the single-threaded
+worker (max 1 concurrent build) with per-stage checkpoints and
+startup crash recovery. Default off. Server logs carry `spark_call`,
+`spark_retry`, `job_claim`, `job_stage`, `job_done`, `worker_recover`
+lines (safe fields only — no prompts, outputs, or keys).

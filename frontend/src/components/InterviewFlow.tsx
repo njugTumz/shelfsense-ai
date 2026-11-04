@@ -6,6 +6,7 @@ import {
   answerQuestion,
   approveRequirements,
   buildApplication,
+  cancelBuild,
   createMission,
   frameUrl,
   generateRequirements,
@@ -159,12 +160,31 @@ function SpecReview({ spec }: { spec: StructuredRequirements }) {
   );
 }
 
+function friendlyProviderError(errorClass: string): string | null {
+  if (errorClass === "SparkTransientError" || errorClass === "SparkRateLimitError") {
+    return "The AI service was slow or busy. Nothing was half-built — retrying is safe.";
+  }
+  if (errorClass === "SparkAuthError" || errorClass === "SparkUnavailableError") {
+    return "The AI service sign-in failed. Please contact support instead of retrying.";
+  }
+  if (errorClass === "SparkBadRequestError" || errorClass === "GenerationValidationError") {
+    return "The AI service returned an unusable response. A retry usually fixes this.";
+  }
+  return null;
+}
+
 function GenerationPanel({ generation }: { generation: GenerationRecord }) {
   if (generation.status === "generating") {
     return <p className="mt-2 text-stone-600">Generation in progress…</p>;
   }
   if (generation.status === "failed") {
-    return <p className="mt-2 text-sm text-red-800">{generation.error}</p>;
+    const friendly = friendlyProviderError(generation.error_class ?? "");
+    return (
+      <div className="mt-2">
+        {friendly !== null && <p className="text-sm text-stone-700">{friendly}</p>}
+        <p className="mt-1 text-sm text-red-800">{generation.error}</p>
+      </div>
+    );
   }
   return (
     <div className="mt-2">
@@ -818,7 +838,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
                   withMissionPolling(mission.id, async () => {
                     const approved = await approveRequirements(mission.id);
                     setBusy("Generating application in E2B — this takes several minutes…");
-                    return buildApplication(approved.id);
+                    return buildApplication(approved.id, false, crypto.randomUUID());
                   }),
                   undefined,
                   "build",
@@ -842,16 +862,26 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
             Approved{mission.approved_at !== "" ? ` at ${mission.approved_at}` : ""} — ready to build.
           </p>
           {mission.generation !== null && mission.generation.status === "failed" && (
-            <p className="mt-1 text-sm text-red-800">
-              Last generation failed and can be retried: {mission.generation.error.slice(0, 300)}
-            </p>
+            <div className="mt-1">
+              {friendlyProviderError(mission.generation.error_class ?? "") !== null && (
+                <p className="text-sm text-stone-700">
+                  {friendlyProviderError(mission.generation.error_class ?? "")}
+                </p>
+              )}
+              <p className="mt-1 text-sm text-red-800">
+                Last generation failed and can be retried: {mission.generation.error.slice(0, 300)}
+              </p>
+            </div>
           )}
           <button
             type="button"
             onClick={() =>
               void run(
                 "Generating application in E2B — this takes several minutes…",
-                withMissionPolling(mission.id, () => buildApplication(mission.id)),
+                withMissionPolling(
+                  mission.id,
+                  () => buildApplication(mission.id, false, crypto.randomUUID()),
+                ),
                 undefined,
                 "build",
               )
@@ -866,10 +896,21 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
       )}
 
       {mission !== null && ["BUILDING", "RUNNING", "AUDITING"].includes(mission.status) && (
-        <p className="mt-2 text-stone-700">
-          Build {mission.status.toLowerCase()} — the request that started it will show the result
-          when it finishes; reloading shows the final state.
-        </p>
+        <div className="mt-2">
+          <p className="text-stone-700">
+            Build {mission.status.toLowerCase()}
+            {mission.progress_label !== "" ? ` — ${mission.progress_label}` : ""} Reloading
+            shows the latest state.
+          </p>
+          <button
+            type="button"
+            onClick={() => void run("Cancelling…", () => cancelBuild(mission.id))}
+            disabled={busy !== null}
+            className="mt-2 rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment disabled:opacity-50 disabled:hover:bg-white"
+          >
+            Cancel build
+          </button>
+        </div>
       )}
 
       {mission !== null && TERMINAL_BUILD_STATES.includes(mission.status) && (

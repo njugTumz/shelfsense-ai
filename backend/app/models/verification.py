@@ -126,6 +126,7 @@ class AuditResult(BaseModel):
     model_id: str = ""
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str = ""
+    error_class: str = ""
     latency_s: float = 0.0
 
 

@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
 from app.core.store import load_mission, save_mission, utc_now_iso
@@ -20,7 +20,7 @@ from app.models.interview import (
 )
 from app.models.media import MediaRecord
 from app.models.mission import Mission, MissionStatus
-from app.services.build import build_application
+from app.services.build import build_application, cancel_build
 from app.services.repair import repair_application
 from app.services.interview import (
     LifecycleError,
@@ -230,20 +230,42 @@ class BuildRequest(BaseModel):
 
 
 @router.post("/{mission_id}/build", response_model=Mission)
-def api_build_application(mission_id: str, body: BuildRequest) -> Mission:
+def api_build_application(
+    mission_id: str,
+    body: BuildRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> Mission:
     """Generate the app from the approved spec, run it in E2B, verify it.
 
     Synchronous by design for the MVP: generation plus E2B build/run
     takes several minutes. Generation failure returns the mission with
-    its previous status and the real error (safe to retry).
+    its previous status and the real error (safe to retry). Pass a
+    client-generated Idempotency-Key per user action: network retries
+    and double submits with the same key return current state instead
+    of starting duplicate work.
     """
     _mission_or_404(mission_id)
     try:
-        return build_application(mission_id, force=body.force)
+        return build_application(mission_id, force=body.force, idempotency_key=idempotency_key)
     except LifecycleError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{mission_id}/build/cancel", response_model=Mission)
+def api_cancel_build(mission_id: str) -> Mission:
+    """Cancel the mission's active background build.
+
+    A queued build never starts; a running one stops at the next stage
+    boundary and the mission returns to APPROVED. Synchronous in-flight
+    builds cannot be cancelled (409).
+    """
+    _mission_or_404(mission_id)
+    try:
+        return cancel_build(mission_id)
+    except LifecycleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{mission_id}/preview", response_model=Mission)

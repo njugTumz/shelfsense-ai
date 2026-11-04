@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     media_storage_path: Path = Path("./uploads")
     max_upload_size_mb: int = Field(default=100, ge=1, le=2048)
 
+    # Background builds: POST /build enqueues a SQLite-backed job run by a
+    # single in-process worker (max 1 concurrent build) instead of blocking
+    # the request. Off by default; enable only after validating recovery.
+    build_async: bool = False
+
     @field_validator("frontend_origin", "modal_endpoint_url", "meta_model_base_url")
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:

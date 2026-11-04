@@ -22,6 +22,9 @@ from app.models.interview import (
 from app.models.mission import Mission, MissionStatus
 from app.services.spark_client import SparkError, responses_structured
 
+#: Read budget for one interviewer turn (low effort, short output).
+INTERVIEW_TIMEOUT_S = 180.0
+
 MAX_INPUT_CHARS = 8000
 
 INTERVIEWER_SYSTEM = """\
@@ -78,6 +81,7 @@ def _ask_model(mission: Mission) -> tuple[bool, str, str]:
         schema=QUESTION_SCHEMA,
         input_text=f"{INTERVIEWER_SYSTEM}\n\n{_render_evidence(mission)}",
         effort="low",
+        timeout_s=INTERVIEW_TIMEOUT_S,
     )
     try:
         return bool(data["needs_more"]), str(data.get("question", "")), str(data.get("rationale", ""))
