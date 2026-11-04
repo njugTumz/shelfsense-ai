@@ -34,6 +34,7 @@ from app.services.media import (
     save_upload,
 )
 from app.services.pipeline import run_mission_verification
+from app.services.preview import PreviewError, launch_preview
 from app.services.requirements import (
     approve_requirements,
     generate_requirements,
@@ -243,6 +244,24 @@ def api_build_application(mission_id: str, body: BuildRequest) -> Mission:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{mission_id}/preview", response_model=Mission)
+def api_launch_preview(mission_id: str) -> Mission:
+    """Launch a temporary live preview of the mission's stored generated files.
+
+    Synchronous by design for the MVP: a fresh E2B sandbox plus npm
+    install/build takes about a minute. Runs no models: the stored files
+    are served as-is. Reuses an active preview instead of launching a
+    duplicate; an expired sandbox is cleaned up before replacement.
+    """
+    _mission_or_404(mission_id)
+    try:
+        return launch_preview(mission_id)
+    except LifecycleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PreviewError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/{mission_id}/generation", response_model=GenerationRecord)

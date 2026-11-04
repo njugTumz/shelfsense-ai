@@ -39,6 +39,20 @@ class MissionStatus(str, Enum):
     PRESENTED = "PRESENTED"
 
 
+class MissionPreview(BaseModel):
+    """On-demand live preview of the mission's stored generated files.
+
+    Previews are temporary E2B sandboxes, not permanent hosting: ``expires_at``
+    is the honest live-until time. A failed launch records ``error`` with no URL.
+    """
+
+    sandbox_id: str = ""
+    preview_url: str = ""
+    started_at: str = ""
+    expires_at: str = ""
+    error: str = ""
+
+
 class Mission(BaseModel):
     """Persisted mission with its verification evidence."""
 
@@ -61,6 +75,7 @@ class Mission(BaseModel):
     media: MediaRecord | None = None
     progress_step: str = ""
     progress_label: str = ""
+    preview: MissionPreview | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

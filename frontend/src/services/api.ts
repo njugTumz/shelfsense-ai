@@ -254,6 +254,14 @@ export interface StructuredRequirements {
   revision: number;
 }
 
+export interface MissionPreview {
+  sandbox_id: string;
+  preview_url: string;
+  started_at: string;
+  expires_at: string;
+  error: string;
+}
+
 export interface Mission {
   id: string;
   name: string;
@@ -275,6 +283,7 @@ export interface Mission {
   is_approved: boolean;
   progress_step: string;
   progress_label: string;
+  preview: MissionPreview | null;
 }
 
 const API_URL =
@@ -383,6 +392,12 @@ export async function buildApplication(
 
 export async function repairApplication(missionId: string): Promise<Mission> {
   return request<Mission>(`/api/missions/${missionId}/repair`, {
+    method: "POST",
+  });
+}
+
+export async function launchPreview(missionId: string): Promise<Mission> {
+  return request<Mission>(`/api/missions/${missionId}/preview`, {
     method: "POST",
   });
 }

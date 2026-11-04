@@ -10,6 +10,7 @@ import {
   frameUrl,
   generateRequirements,
   getMission,
+  launchPreview,
   repairApplication,
   requestChanges,
   startInterview,
@@ -18,6 +19,7 @@ import {
   type GenerationRecord,
   type MediaRecord,
   type Mission,
+  type MissionPreview,
   type RepairRecord,
   type StructuredRequirements,
 } from "../services/api.ts";
@@ -199,6 +201,75 @@ function GenerationPanel({ generation }: { generation: GenerationRecord }) {
 }
 
 const TERMINAL_BUILD_STATES = ["VERIFIED", "VERIFIED_WITH_WARNINGS", "FAILED", "AUDIT_LIMITED"];
+
+function isPreviewActive(preview: MissionPreview | null | undefined): boolean {
+  if (preview == null || preview.preview_url === "") return false;
+  const expires = Date.parse(preview.expires_at);
+  return !Number.isNaN(expires) && expires > Date.now();
+}
+
+function PreviewPanel({
+  mission,
+  busy,
+  onLaunch,
+}: {
+  mission: Mission;
+  busy: string | null;
+  onLaunch: () => void;
+}) {
+  const hasFiles = mission.files !== null && Object.keys(mission.files).length > 0;
+  if (!hasFiles) return null;
+  const preview = mission.preview ?? null;
+  const active = isPreviewActive(preview);
+  return (
+    <div className="mt-3">
+      <h3 className="text-lg font-semibold">Open the application</h3>
+      {active && preview !== null ? (
+        <>
+          <a
+            href={preview.preview_url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-2 inline-block bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700"
+          >
+            Open generated application
+          </a>
+          <p className="mt-1 text-sm text-stone-500">
+            Live until {new Date(preview.expires_at).toLocaleString()} — a temporary
+            preview sandbox, not permanent hosting. The link stops responding at expiry.
+          </p>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={onLaunch}
+            disabled={busy !== null}
+            className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
+          >
+            {preview !== null && (preview.error !== "" || preview.preview_url !== "")
+              ? "Relaunch preview"
+              : "Launch preview"}
+          </button>
+          {preview !== null && preview.error !== "" && (
+            <p className="mt-1 text-sm text-red-800">
+              Last preview failed: {preview.error.slice(0, 300)}
+            </p>
+          )}
+          {preview !== null && preview.error === "" && preview.preview_url !== "" && (
+            <p className="mt-1 text-sm text-stone-500">
+              Previous preview expired — relaunching starts a fresh temporary sandbox.
+            </p>
+          )}
+          <p className="mt-1 text-sm text-stone-500">
+            Serves this mission&apos;s stored generated files in a temporary sandbox for
+            about an hour. No rebuild, no AI calls.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
 
 function RepairPanel({ repair }: { repair: RepairRecord }) {
   if (repair.status === "repairing") {
@@ -812,6 +883,18 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
               <GenerationPanel generation={mission.generation} />
             </>
           )}
+          <PreviewPanel
+            mission={mission}
+            busy={busy}
+            onLaunch={() =>
+              void run(
+                "Starting preview sandbox — install and build take about a minute…",
+                () => launchPreview(mission.id),
+                undefined,
+                "preview",
+              )
+            }
+          />
           {mission.repair !== null && (
             <>
               <h3 className="mt-3 text-lg font-semibold">Repair &amp; retest</h3>
