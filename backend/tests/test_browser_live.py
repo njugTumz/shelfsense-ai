@@ -9,7 +9,10 @@ Positive fixture renders prefixed status text ("Status: Preparing") with a
 working advance button (the mission f30ec35cdc49 shape): advance and persist
 steps must PASS. Negative fixture has a placebo advance button that changes
 nothing: the advance step must FAIL, proving the fix did not weaken the
-assertion into a substring match on control wording.
+assertion into a substring match on control wording. Select fixture uses a
+status <select> whose option values differ from their labels (the KDS app
+shape, e.g. value="received" with label "Received") and rejects skipped
+transitions: advance, persist, and invalid steps must all PASS.
 """
 
 import os
@@ -89,10 +92,79 @@ NEGATIVE_HTML = _FIXTURE_SHELL % (
     "() => { /* placebo: intentionally changes nothing */ }",
 )
 
+SELECT_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Select fixture</title></head>
+<body>
+<h1>Kitchen Ticket Queue</h1>
+<form id="create">
+<label for="order-details">Order details</label>
+<input id="order-details" type="text" placeholder="e.g. Table 9, corn ribs">
+<button type="submit">Add Order</button>
+</form>
+<ul id="queue"></ul>
+<script>
+const KEY = "fixture-select-v1";
+const ORDER = ["received", "preparing", "ready", "completed"];
+const LABELS = {"received": "Received", "preparing": "Preparing", "ready": "Ready", "completed": "Completed"};
+let orders = [];
+try { orders = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) { orders = []; }
+function save() { localStorage.setItem(KEY, JSON.stringify(orders)); }
+function render() {
+  const ul = document.getElementById("queue");
+  ul.innerHTML = "";
+  for (const o of orders) {
+    const li = document.createElement("li");
+    const id = document.createElement("span"); id.textContent = "ID " + o.id;
+    const contents = document.createElement("span"); contents.textContent = o.contents;
+    const status = document.createElement("span"); status.textContent = "Status: " + LABELS[o.status];
+    li.appendChild(id); li.appendChild(document.createTextNode(" "));
+    li.appendChild(contents); li.appendChild(document.createTextNode(" "));
+    li.appendChild(status); li.appendChild(document.createTextNode(" "));
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", "Ticket status");
+    for (const v of ORDER) {
+      const opt = document.createElement("option");
+      opt.value = v; opt.textContent = LABELS[v];
+      sel.appendChild(opt);
+    }
+    sel.value = o.status;
+    sel.addEventListener("change", () => {
+      const from = o.status, to = sel.value;
+      if (ORDER.indexOf(to) === ORDER.indexOf(from) + 1) {
+        o.status = to; save(); render();
+      } else {
+        sel.value = from;
+        let alert = document.getElementById("reject-notice");
+        if (!alert) {
+          alert = document.createElement("div");
+          alert.id = "reject-notice"; alert.setAttribute("role", "alert");
+          alert.textContent = "Invalid transition rejected.";
+          document.body.appendChild(alert);
+        }
+      }
+    });
+    li.appendChild(sel);
+    ul.appendChild(li);
+  }
+}
+document.getElementById("create").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = document.getElementById("order-details");
+  const text = input.value.trim();
+  if (!text) return;
+  orders.push({id: "ticket-" + Date.now(), contents: text, status: "received"});
+  save(); render(); input.value = "";
+});
+render();
+</script>
+</body></html>
+"""
+
 
 def _serve_fixtures(sbx) -> None:
     sbx.files.write("/tmp/fixture/positive.html", POSITIVE_HTML)
     sbx.files.write("/tmp/fixture/negative.html", NEGATIVE_HTML)
+    sbx.files.write("/tmp/fixture/select.html", SELECT_HTML)
     sbx.commands.run(
         f"python3 -m http.server {FIXTURE_PORT} --directory /tmp/fixture",
         background=True,
@@ -102,7 +174,8 @@ def _serve_fixtures(sbx) -> None:
     ready = sbx.commands.run(
         f"for i in $(seq 1 30); do curl -sf http://localhost:{FIXTURE_PORT}/positive.html"
         " >/dev/null && break; sleep 2; done; "
-        f"curl -sf http://localhost:{FIXTURE_PORT}/negative.html >/dev/null",
+        f"curl -sf http://localhost:{FIXTURE_PORT}/negative.html >/dev/null && "
+        f"curl -sf http://localhost:{FIXTURE_PORT}/select.html >/dev/null",
         timeout=120,
     )
     assert ready.exit_code == 0, "fixture server never became ready"
@@ -145,6 +218,16 @@ def test_browser_button_branch_fixtures() -> None:
         assert negative["advance"].status.value == "fail", "placebo advance must fail"
         assert "not shown after advance" in negative["advance"].detail
         assert negative["persist"].status.value == "pass", negative["persist"].detail
+
+        # Select controls with machine values + human labels must be driven
+        # by value: advance twice, persist the reached value, and read a
+        # skip-rejection correctly.
+        sbx.commands.run(f"rm -f {BROWSER_ASSERT_PATH} {BROWSER_SCRIPT_PATH}", timeout=30)
+        select = _steps_by_name(run_browser_tests(sbx, f"{base}/select.html"))
+        assert select["create"].status.value == "pass", select["create"].detail
+        assert select["advance"].status.value == "pass", select["advance"].detail
+        assert select["persist"].status.value == "pass", select["persist"].detail
+        assert select["invalid"].status.value == "pass", select["invalid"].detail
     finally:
         try:
             sbx.kill()

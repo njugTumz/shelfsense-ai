@@ -286,12 +286,19 @@ def main():
                     if sel.count() > 0:
                         chain = [sel.input_value()]
                         for _ in (1, 2):
-                            opts = [o.strip() for o in sel.locator("option").all_inner_texts()]
+                            # Options may carry machine values with human labels
+                            # (<option value="active">Active</option>): advance by
+                            # value, falling back to visible text when an option
+                            # has no value attribute (value then equals text).
+                            vals = []
+                            for opt in sel.locator("option").all():
+                                text = opt.inner_text()
+                                vals.append(((opt.get_attribute("value") or "") or text).strip())
                             try:
-                                nxt = opts[opts.index(chain[-1]) + 1]
+                                nxt = vals[vals.index(chain[-1]) + 1]
                             except (ValueError, IndexError):
                                 raise AssertionError(f"no further status option after {chain[-1]!r}")
-                            sel.select_option(label=nxt)
+                            sel.select_option(value=nxt)
                             page.wait_for_timeout(400)
                             if sel.input_value() != nxt:
                                 raise AssertionError(f"control shows {sel.input_value()!r}, expected {nxt!r}")
@@ -360,15 +367,19 @@ def main():
                     rec("invalid", "not_applicable", "no select control; buttons only offer valid transitions",
                         (timed() - t0) * 1000)
                 else:
-                    opts = [o.strip() for o in sel.locator("option").all_inner_texts()]
-                    if len(opts) < 3:
+                    pairs = []
+                    for opt in sel.locator("option").all():
+                        label = opt.inner_text().strip()
+                        pairs.append((((opt.get_attribute("value") or "") or label).strip(), label))
+                    if len(pairs) < 3:
                         rec("invalid", "not_applicable",
                             "no skippable option; invalid transitions not expressible",
                             (timed() - t0) * 1000)
                     else:
-                        initial, skip_target = opts[0], opts[2]
+                        initial_value, initial_label = pairs[0]
+                        skip_value, skip_label = pairs[2]
                         target = identifier
-                        if sel.input_value() != initial:
+                        if sel.input_value() != initial_value:
                             marker2 = MARKER + "-2"
                             form = page.locator("form").first
                             scope = form if form.count() else page
@@ -384,12 +395,13 @@ def main():
                         if target is not None:
                             item = page.locator("li", has_text=target).first
                             sel = item.locator("select").first
-                            sel.select_option(label=skip_target)
+                            sel.select_option(label=skip_label)
                             page.wait_for_timeout(400)
-                            if sel.input_value() == initial:
+                            if sel.input_value() == initial_value:
                                 notice = page.get_by_role("alert").count() > 0
                                 rec("invalid", "pass",
-                                    f"skip to {skip_target} rejected, stayed {initial} (notice shown: {notice})",
+                                    f"skip to {skip_label} rejected, stayed {initial_label} "
+                                    f"(notice shown: {notice})",
                                     (timed() - t0) * 1000)
                             else:
                                 rec("invalid", "fail",
