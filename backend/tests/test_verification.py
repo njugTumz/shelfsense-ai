@@ -209,6 +209,66 @@ def test_pipeline_progress_persists_then_clears(monkeypatch, tmp_path) -> None:
     assert result.progress_label == ""
 
 
+def test_reverify_rebuilds_coverage_and_classification(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.core.store import save_mission
+    from app.models.generation import GenerationRecord, GenerationStatus
+    from app.models.interview import StructuredRequirements
+    from app.models.mission import Mission, MissionStatus
+    from app.services import pipeline as pipeline_module
+
+    spec = StructuredRequirements.model_validate({
+        "business_context": "ctx",
+        "problem_statement": "Orders vanish on reload.",
+        "functional_requirements": [{"id": "FR-1", "requirement": "Keep orders across reload."}],
+        "acceptance_criteria": ["After page reload all orders remain visible."],
+    })
+    mission = Mission(
+        id="p2",
+        status=MissionStatus.APPROVED,
+        spec=spec,
+        files={"/home/user/app/src/App.tsx": "export default function App() { return null; }"},
+        generation=GenerationRecord(
+            status=GenerationStatus.GENERATED, summary="s", manifest=["src/App.tsx"],
+        ),
+    )
+    save_mission(mission)
+
+    monkeypatch.setattr(pipeline_module, "verify_in_e2b", lambda *a, **k: _e2b(True))
+    monkeypatch.setattr(
+        pipeline_module, "active_auditor",
+        lambda: SimpleNamespace(audit=lambda ev: _audit(verdict=AuditVerdict.PASS)),
+    )
+    result = pipeline_module.run_mission_verification("p2")
+    assert result.status == MissionStatus.VERIFIED
+    assert result.verification.coverage is not None
+    arch = result.verification.coverage.architecture
+    assert arch is not None
+    assert arch.category.value == "local_persistence"
+    assert any("not a production database" in limit for limit in arch.limitations)
+
+
+def test_reverify_without_manifest_keeps_coverage_none(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.core.store import save_mission
+    from app.models.mission import Mission, MissionStatus
+    from app.services import pipeline as pipeline_module
+
+    mission = Mission(id="p3", status=MissionStatus.APPROVED,
+                      files={"/home/user/app/src/App.tsx": "x"})
+    save_mission(mission)
+    monkeypatch.setattr(pipeline_module, "verify_in_e2b", lambda *a, **k: _e2b(True))
+    monkeypatch.setattr(
+        pipeline_module, "active_auditor",
+        lambda: SimpleNamespace(audit=lambda ev: _audit(verdict=AuditVerdict.PASS)),
+    )
+    result = pipeline_module.run_mission_verification("p3")
+    assert result.status == MissionStatus.VERIFIED
+    assert result.verification.coverage is None
+
+
 def test_e2b_unavailable_never_emits_progress(monkeypatch) -> None:
     from app.services.e2b_verification import verify_in_e2b
 

@@ -14,6 +14,7 @@ from app.demo.restaurant_app import (
     DEMO_REQUIREMENTS,
     demo_files,
 )
+from app.models.generation import GeneratedFile, GenerationOutput
 from app.models.mission import Mission, MissionStatus
 from app.models.verification import VerificationResult, compute_verdict
 from app.services.auditors import (
@@ -22,11 +23,40 @@ from app.services.auditors import (
     AuditEvidence,
     active_auditor,
 )
+from app.services.coverage import build_coverage_report
 from app.services.e2b_verification import verify_in_e2b
 
 
 def _short_path(path: str) -> str:
     return path[len(APP_ROOT) + 1 :] if path.startswith(APP_ROOT + "/") else path
+
+
+def _reconstruct_output(mission: Mission) -> GenerationOutput | None:
+    """Rebuild the developer output from stored generation + files.
+
+    Lets re-verification (which rebuilds VerificationResult from scratch)
+    keep the coverage report — including the architecture classification —
+    instead of dropping it. Returns None when the mission predates stored
+    manifests (demo/legacy missions keep coverage=None).
+    """
+    record = mission.generation
+    manifest = list(record.manifest) if record is not None else []
+    if not manifest or not mission.files:
+        return None
+    try:
+        files = [
+            GeneratedFile(path=path, content=mission.files[f"{APP_ROOT}/{path}"])
+            for path in manifest
+        ]
+    except KeyError:
+        return None
+    return GenerationOutput(
+        summary=record.summary,
+        files=files,
+        feature_map=list(record.feature_map),
+        unimplemented=list(record.unimplemented),
+        assumptions=list(record.assumptions),
+    )
 
 
 def run_mission_verification(
@@ -113,6 +143,12 @@ def run_mission_verification(
         started_at=run_started,
         completed_at=utc_now_iso(),
     )
+    if mission.spec is not None:
+        output = _reconstruct_output(mission)
+        if output is not None:
+            mission.verification.coverage = build_coverage_report(
+                mission.spec, output, e2b
+            )
     if status == MissionStatus.FAILED:
         if reason == "e2b_unavailable":
             mission.error = e2b.error
