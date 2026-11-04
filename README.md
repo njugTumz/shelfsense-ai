@@ -348,18 +348,30 @@ restaurant video, alongside the original provider smoke tests.
 
 FIELD is deployed on Azure and validated with a real end-to-end run:
 
-- Live URL: https://field-demo-k7q2.southafricanorth.azurecontainer.io
+- Live URL: https://field-demo-k7q2b.southafricanorth.azurecontainer.io
 - Azure Container Instances + Caddy (TLS terminator, static frontend,
   API reverse proxy) with the FastAPI backend in one group.
 - Region: South Africa North.
-- Verified end-to-end production workflow: 462 seconds.
+- Backend image: `field-backend:88baa52`, edge image: `field-caddy:4fa3c6a-b`.
+- Fresh demo mission `b6669ee31e0a` (kitchen video → kitchen-display app):
 - Final verdict: VERIFIED_WITH_WARNINGS.
-- Browser tests: 4 passed, 1 skipped (invalid-transition path).
-- Independent Muse Spark audit: PASS_WITH_WARNINGS.
+- Browser tests: load/create/advance/persist PASS, console clean PASS,
+  390px responsive PASS; invalid-transition FAIL reported but non-gating
+  (not required by the acceptance criteria).
+- Independent Muse Spark audit: PASS_WITH_WARNINGS (untested-flow
+  coverage findings; no blocking defects).
+- Architecture classification: LOCAL_PERSISTENCE with explicit
+  prototype limits (single-browser storage, not shared or backed up).
 
 This is the observed result of the tested mission, not a guarantee:
 every mission is verified independently, and future missions can
 return different verdicts.
+
+Ops note: Caddy provisions Let's Encrypt certificates into ephemeral
+container storage, so every group recreation burns one of 5
+certificates per 168h per hostname. The previous hostname exhausted
+its budget during repeated deploys; persist `/data` (e.g. Azure Files)
+before the next production move, and do not recreate casually.
 
 ## Tests
 
