@@ -8,8 +8,11 @@ and E2B behavior is proven by tests/test_build_live.py.
 import pytest
 from fastapi.testclient import TestClient
 
+import app.services.developer as developer_module
 from app.core.config import get_settings
 from app.main import app
+from app.services.developer import GenerationValidationError, generate_application
+from app.services.spark_client import SparkError, SparkTruncatedError
 from app.models.generation import (
     AcceptanceSupport,
     FeatureMapping,
@@ -241,6 +244,9 @@ def test_generation_failure_rolls_back_and_allows_retry(db_path, monkeypatch) ->
     assert first.generation is not None and first.generation.status.value == "failed"
     assert "boom" in first.error
     assert first.files is None
+    assert first.progress_step == ""
+    assert first.progress_label == ""
+    assert first.spec is not None
 
     second = build_module.build_application("b1", db_path=db_path)
     assert second.status.value == "APPROVED"
@@ -289,7 +295,7 @@ def test_build_e2b_failure_yields_failed(db_path, monkeypatch) -> None:
     _approved_mission(db_path)
     monkeypatch.setattr(build_module, "generate_application",
                         lambda spec: (_output(), {"input_tokens": 1}, "stub-model"))
-    monkeypatch.setattr(pipeline_module, "verify_in_e2b", lambda files, acceptance_criteria=None: _stub_e2b(False))
+    monkeypatch.setattr(pipeline_module, "verify_in_e2b", lambda files, acceptance_criteria=None, progress=None: _stub_e2b(False))
     monkeypatch.setattr(pipeline_module, "active_auditor",
                         lambda: type("A", (), {"audit": staticmethod(lambda ev: _stub_audit(True))})())
 
@@ -311,7 +317,7 @@ def test_build_audit_unavailable_yields_audit_limited(db_path, monkeypatch) -> N
     _approved_mission(db_path)
     monkeypatch.setattr(build_module, "generate_application",
                         lambda spec: (_output(), {"input_tokens": 1}, "stub-model"))
-    monkeypatch.setattr(pipeline_module, "verify_in_e2b", lambda files, acceptance_criteria=None: _stub_e2b(True))
+    monkeypatch.setattr(pipeline_module, "verify_in_e2b", lambda files, acceptance_criteria=None, progress=None: _stub_e2b(True))
     monkeypatch.setattr(pipeline_module, "active_auditor",
                         lambda: type("A", (), {"audit": staticmethod(lambda ev: _stub_audit(False))})())
 
@@ -320,3 +326,61 @@ def test_build_audit_unavailable_yields_audit_limited(db_path, monkeypatch) -> N
     assert result.verification is not None
     assert result.verification.coverage is not None
     assert len(result.verification.coverage.acceptance) == 2
+
+
+def _output_dict() -> dict:
+    return {
+        "summary": "s",
+        "files": [{"path": "src/App.tsx",
+                   "content": "export default function App() { return null; }"}],
+        "feature_map": [],
+        "unimplemented": [],
+        "assumptions": [],
+    }
+
+
+def test_generate_application_accepts_complete_response(monkeypatch) -> None:
+    calls = []
+
+    def fake_responses(**kwargs):
+        calls.append(kwargs)
+        return _output_dict(), {"input_tokens": 5, "output_tokens": 9}
+
+    monkeypatch.setattr(developer_module, "responses_structured", fake_responses)
+    output, usage, _ = generate_application(_spec())
+    assert [f.path for f in output.files] == ["src/App.tsx"]
+    assert usage["output_tokens"] == 9
+    assert len(calls) == 1
+    assert calls[0]["max_output_tokens"] == developer_module.DEVELOPER_MAX_OUTPUT_TOKENS
+
+
+def test_generate_application_propagates_truncation_diagnostics(monkeypatch) -> None:
+    def truncated(**kwargs):
+        raise SparkTruncatedError("max_output_tokens", 6328, {"output_tokens": 16384})
+
+    monkeypatch.setattr(developer_module, "responses_structured", truncated)
+    with pytest.raises(SparkTruncatedError) as excinfo:
+        generate_application(_spec())
+    assert excinfo.value.reason == "max_output_tokens"
+    assert excinfo.value.output_chars == 6328
+
+
+def test_generate_application_propagates_persistent_failure(monkeypatch) -> None:
+    def always_truncated(**kwargs):
+        raise SparkError("response truncated by the output token budget on both attempts; safe to retry")
+
+    monkeypatch.setattr(developer_module, "responses_structured", always_truncated)
+    with pytest.raises(SparkError, match="safe to retry"):
+        generate_application(_spec())
+
+
+def test_generate_application_rejects_invalid_manifest_structure(monkeypatch) -> None:
+    bad = _output_dict()
+    bad["files"] = [{"path": "../escape.tsx", "content": "x"}]
+
+    def fake_responses(**kwargs):
+        return bad, {}
+
+    monkeypatch.setattr(developer_module, "responses_structured", fake_responses)
+    with pytest.raises(GenerationValidationError, match="unsafe path"):
+        generate_application(_spec())

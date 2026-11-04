@@ -62,6 +62,8 @@ def build_application(mission_id: str, force: bool = False, db_path=None) -> Mis
     spec = mission.spec
     mission.status = MissionStatus.BUILDING
     mission.error = ""
+    mission.progress_step = "generating"
+    mission.progress_label = "Generating application files with Muse Spark…"
     record = GenerationRecord(status=GenerationStatus.GENERATING, started_at=utc_now_iso())
     mission.generation = record
     save_mission(mission, db_path)
@@ -75,6 +77,8 @@ def build_application(mission_id: str, force: bool = False, db_path=None) -> Mis
         mission.generation = record
         mission.status = previous_status
         mission.error = record.error
+        mission.progress_step = ""
+        mission.progress_label = ""
         return save_mission(mission, db_path)
 
     merged = scaffold_files()

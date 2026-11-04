@@ -166,3 +166,58 @@ def test_no_secrets_in_mission_responses() -> None:
     for value in (get_settings().e2b_api_key, get_settings().meta_model_api_key):
         if value:
             assert value not in raw
+
+
+def test_progress_fields_default_empty_for_old_rows() -> None:
+    from app.models.mission import Mission
+
+    mission = Mission.model_validate({"id": "old", "status": "CREATED"})
+    assert mission.progress_step == ""
+    assert mission.progress_label == ""
+
+
+def test_pipeline_progress_persists_then_clears(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from app.core.store import load_mission, save_mission
+    from app.models.mission import Mission, MissionStatus
+    from app.services import pipeline as pipeline_module
+
+    mission = Mission(id="p1", status=MissionStatus.APPROVED,
+                      files={"/home/user/app/src/App.tsx": "x"})
+    save_mission(mission)
+    observed: dict[str, str] = {}
+
+    def fake_verify(files, acceptance_criteria=None, progress=None):
+        assert progress is not None
+        progress("e2b_install", "Installing dependencies in E2B…")
+        mid = load_mission("p1")
+        assert mid is not None
+        observed["step"] = mid.progress_step
+        observed["label"] = mid.progress_label
+        return _e2b(True)
+
+    monkeypatch.setattr(pipeline_module, "verify_in_e2b", fake_verify)
+    monkeypatch.setattr(
+        pipeline_module, "active_auditor",
+        lambda: SimpleNamespace(audit=lambda ev: _audit(verdict=AuditVerdict.PASS)),
+    )
+    result = pipeline_module.run_mission_verification("p1")
+    assert observed == {"step": "e2b_install", "label": "Installing dependencies in E2B…"}
+    assert result.status == MissionStatus.VERIFIED
+    assert result.progress_step == ""
+    assert result.progress_label == ""
+
+
+def test_e2b_unavailable_never_emits_progress(monkeypatch) -> None:
+    from app.services.e2b_verification import verify_in_e2b
+
+    monkeypatch.setenv("E2B_API_KEY", "")
+    get_settings.cache_clear()
+    try:
+        calls: list[tuple[str, str]] = []
+        result = verify_in_e2b({"a": "b"}, progress=calls.append)
+    finally:
+        get_settings.cache_clear()
+    assert result.available is False
+    assert calls == []

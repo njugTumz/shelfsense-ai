@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import VerificationResults from "./VerificationResults.tsx";
+import WorkflowProgress from "./WorkflowProgress.tsx";
 import {
   analyzeMission,
   answerQuestion,
@@ -8,7 +9,6 @@ import {
   createMission,
   frameUrl,
   generateRequirements,
-  getMedia,
   getMission,
   repairApplication,
   requestChanges,
@@ -26,7 +26,7 @@ function EvidencePanel({ items }: { items: EvidenceItem[] }) {
   if (items.length === 0) return null;
   const hasDemo = items.some((item) => item.source.includes("demo fixture"));
   return (
-    <div className="mt-4 border border-stone-200 p-4">
+    <div className="mt-4 border border-stone-200 bg-white p-4 rounded-lg">
       <h4 className="font-semibold">What FIELD has understood</h4>
       {hasDemo && (
         <p className="mt-1 text-sm text-stone-500">
@@ -246,7 +246,7 @@ const MEDIA_STAGE_LABELS: Record<string, string> = {
 
 function EvidencePreview({ missionId, media }: { missionId: string; media: MediaRecord }) {
   return (
-    <div className="mt-3 border border-stone-200 p-4">
+    <div className="mt-3 border border-stone-200 bg-white p-4 rounded-lg">
       <h4 className="font-semibold">Video evidence</h4>
       <p className="mt-1 text-sm text-stone-500">
         {media.original_filename !== "" ? media.original_filename : "uploaded video"} ·{" "}
@@ -342,9 +342,16 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
   const [resumeId, setResumeId] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [mediaStage, setMediaStage] = useState<string | null>(null);
+  const [inFlight, setInFlight] = useState<string | null>(null);
 
-  async function run(stage: string, action: () => Promise<Mission>, clear?: () => void) {
+  async function run(
+    stage: string,
+    action: () => Promise<Mission>,
+    clear?: () => void,
+    step?: string | null,
+  ) {
     setBusy(stage);
+    setInFlight(step ?? null);
     setFailure(null);
     try {
       const updated = await action();
@@ -354,26 +361,51 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
       setFailure(error instanceof Error ? error.message : "Unknown error");
     } finally {
       setBusy(null);
+      setInFlight(null);
     }
   }
 
+  function withMissionPolling(missionId: string, action: () => Promise<Mission>) {
+    return async (): Promise<Mission> => {
+      const handle = window.setInterval(() => {
+        void getMission(missionId)
+          .then((current) => {
+            setMission(current);
+            if (current.media !== null) setMediaStage(current.media.status);
+          })
+          .catch(() => undefined);
+      }, 3000);
+      try {
+        return await action();
+      } finally {
+        window.clearInterval(handle);
+      }
+    };
+  }
+
   function start() {
-    void run("Starting interview…", async () => {
-      const created = await createMission("Interview");
-      return startInterview(created.id, { owner_context: context, use_demo_evidence: useDemo });
-    });
+    void run(
+      "Starting interview…",
+      async () => {
+        const created = await createMission("Interview");
+        return startInterview(created.id, { owner_context: context, use_demo_evidence: useDemo });
+      },
+      undefined,
+      "interview",
+    );
   }
 
   function resume() {
     const id = resumeId.trim();
     if (id === "") return;
-    void run("Loading mission…", () => getMission(id));
+    void run("Loading mission…", () => getMission(id), undefined, "reload");
   }
 
   function uploadAndAnalyze() {
     if (selectedFile === null) return;
     const file = selectedFile;
     setBusy("Uploading video…");
+    setInFlight("upload");
     setFailure(null);
     setMediaStage("uploaded");
     (async () => {
@@ -383,13 +415,17 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
         const uploaded = await uploadVideo(created.id, file);
         setMission(uploaded);
         setBusy("Analyzing video — this takes a couple of minutes…");
+        setInFlight("analyze");
         const pending = analyzeMission(created.id);
         handle = window.setInterval(() => {
-          void getMedia(created.id)
-            .then((media) => {
-              setMediaStage(media.status);
-              if (media.status === "ready" || media.status === "failed") {
-                window.clearInterval(handle);
+          void getMission(created.id)
+            .then((current) => {
+              setMission(current);
+              if (current.media !== null) {
+                setMediaStage(current.media.status);
+                if (current.media.status === "ready" || current.media.status === "failed") {
+                  window.clearInterval(handle);
+                }
               }
             })
             .catch(() => undefined);
@@ -405,13 +441,23 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
         setFailure(error instanceof Error ? error.message : "Unknown error");
       } finally {
         setBusy(null);
+        setInFlight(null);
       }
     })();
   }
 
   function retryAnalyze(missionId: string) {
     setBusy("Analyzing video — this takes a couple of minutes…");
+    setInFlight("analyze");
     setFailure(null);
+    const handle = window.setInterval(() => {
+      void getMission(missionId)
+        .then((current) => {
+          setMission(current);
+          if (current.media !== null) setMediaStage(current.media.status);
+        })
+        .catch(() => undefined);
+    }, 3000);
     void analyzeMission(missionId)
       .then((done) => {
         setMediaStage(done.media?.status ?? null);
@@ -420,7 +466,11 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
       .catch((error: unknown) => {
         setFailure(error instanceof Error ? error.message : "Unknown error");
       })
-      .finally(() => setBusy(null));
+      .finally(() => {
+        window.clearInterval(handle);
+        setBusy(null);
+        setInFlight(null);
+      });
   }
 
   const pending =
@@ -454,7 +504,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
             type="button"
             onClick={uploadAndAnalyze}
             disabled={!backendOnline || busy !== null || selectedFile === null}
-            className="mt-2 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+            className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
           >
             Upload &amp; analyze video
           </button>
@@ -472,7 +522,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
                 onChange={(event) => setContext(event.target.value)}
                 rows={4}
                 placeholder="Orders are written on paper slips and get lost during rush hours…"
-                className="mt-1 block w-full border border-stone-300 p-2 text-sm"
+                className="mt-1 block w-full rounded-md border border-stone-300 bg-white p-2 text-sm"
               />
             </label>
             <label className="mt-2 flex items-center gap-2 text-sm text-stone-700">
@@ -488,7 +538,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
                 type="button"
                 onClick={start}
                 disabled={!backendOnline || busy !== null}
-                className="bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+                className="bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
               >
                 Start interview
               </button>
@@ -499,13 +549,13 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
               value={resumeId}
               onChange={(event) => setResumeId(event.target.value)}
               placeholder="mission id"
-              className="border border-stone-300 p-2 font-mono text-sm"
+              className="rounded-md border border-stone-300 bg-white p-2 font-mono text-sm"
             />
             <button
               type="button"
               onClick={resume}
               disabled={!backendOnline || busy !== null || resumeId.trim() === ""}
-              className="border border-stone-300 px-4 py-2 font-medium disabled:opacity-50"
+              className="rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment disabled:opacity-50 disabled:hover:bg-white"
             >
               Resume mission
             </button>
@@ -518,6 +568,10 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
           Mission {mission.id} · {mission.status}
         </p>
       )}
+
+      <div className="mt-3">
+        <WorkflowProgress mission={mission} inFlight={inFlight} />
+      </div>
 
       {mission !== null &&
         (mission.status === "VIDEO_UPLOADED" || mission.status === "ANALYZING") &&
@@ -543,7 +597,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
             type="button"
             onClick={() => retryAnalyze(mission.id)}
             disabled={busy !== null}
-            className="mt-2 border border-stone-300 px-4 py-2 font-medium disabled:opacity-50"
+            className="mt-2 rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment disabled:opacity-50 disabled:hover:bg-white"
           >
             Retry analysis
           </button>
@@ -563,18 +617,21 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
               onChange={(event) => setContext(event.target.value)}
               rows={2}
               placeholder="Extra context the video does not show…"
-              className="mt-1 block w-full border border-stone-300 p-2 text-sm"
+              className="mt-1 block w-full rounded-md border border-stone-300 bg-white p-2 text-sm"
             />
           </label>
           <button
             type="button"
             onClick={() =>
-              void run("Starting interview…", () =>
-                startInterview(mission.id, { owner_context: context, use_demo_evidence: false }),
+              void run(
+                "Starting interview…",
+                () => startInterview(mission.id, { owner_context: context, use_demo_evidence: false }),
+                undefined,
+                "interview",
               )
             }
             disabled={busy !== null}
-            className="mt-2 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+            className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
           >
             Start interview from this evidence
           </button>
@@ -595,17 +652,20 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
             onChange={(event) => setAnswer(event.target.value)}
             rows={3}
             placeholder="Your answer…"
-            className="mt-2 block w-full border border-stone-300 p-2 text-sm"
+            className="mt-2 block w-full rounded-md border border-stone-300 bg-white p-2 text-sm"
           />
           <button
             type="button"
             onClick={() =>
-              void run("FIELD is thinking…", () => answerQuestion(mission.id, answer), () =>
-                setAnswer(""),
+              void run(
+                "FIELD is thinking…",
+                () => answerQuestion(mission.id, answer),
+                () => setAnswer(""),
+                "answer",
               )
             }
             disabled={busy !== null || answer.trim() === ""}
-            className="mt-2 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+            className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
           >
             Submit answer
           </button>
@@ -614,14 +674,21 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
 
       {mission !== null && mission.status === "INTERVIEWING" && pending === null && (
         <div className="mt-2">
-          <p className="font-medium text-green-800">
+          <p className="font-medium text-moss-800">
             Interview complete — {answered.length} question(s) answered.
           </p>
           <button
             type="button"
-            onClick={() => void run("Drafting specification…", () => generateRequirements(mission.id))}
+            onClick={() =>
+              void run(
+                "Drafting specification…",
+                () => generateRequirements(mission.id),
+                undefined,
+                "requirements",
+              )
+            }
             disabled={busy !== null}
-            className="mt-2 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+            className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
           >
             Generate requirements
           </button>
@@ -653,33 +720,41 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
               onChange={(event) => setFeedback(event.target.value)}
               rows={2}
               placeholder="e.g. orders must also track dine-in vs takeaway…"
-              className="mt-1 block w-full border border-stone-300 p-2 text-sm"
+              className="mt-1 block w-full rounded-md border border-stone-300 bg-white p-2 text-sm"
             />
           </label>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() =>
-                void run("Revising specification…", () => requestChanges(mission.id, feedback), () =>
-                  setFeedback(""),
+                void run(
+                  "Revising specification…",
+                  () => requestChanges(mission.id, feedback),
+                  () => setFeedback(""),
+                  "requirements",
                 )
               }
               disabled={busy !== null || feedback.trim() === ""}
-              className="border border-stone-300 px-4 py-2 font-medium disabled:opacity-50"
+              className="rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment disabled:opacity-50 disabled:hover:bg-white"
             >
               Revise
             </button>
             <button
               type="button"
               onClick={() =>
-                void run("Recording approval…", async () => {
-                  const approved = await approveRequirements(mission.id);
-                  setBusy("Generating application in E2B — this takes several minutes…");
-                  return buildApplication(approved.id);
-                })
+                void run(
+                  "Recording approval…",
+                  withMissionPolling(mission.id, async () => {
+                    const approved = await approveRequirements(mission.id);
+                    setBusy("Generating application in E2B — this takes several minutes…");
+                    return buildApplication(approved.id);
+                  }),
+                  undefined,
+                  "build",
+                )
               }
               disabled={busy !== null}
-              className="bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+              className="bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
             >
               Approve requirements &amp; build
             </button>
@@ -692,7 +767,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
 
       {mission !== null && mission.status === "APPROVED" && (
         <div className="mt-2">
-          <p className="font-medium text-green-800">
+          <p className="font-medium text-moss-800">
             Approved{mission.approved_at !== "" ? ` at ${mission.approved_at}` : ""} — ready to build.
           </p>
           {mission.generation !== null && mission.generation.status === "failed" && (
@@ -703,12 +778,15 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
           <button
             type="button"
             onClick={() =>
-              void run("Generating application in E2B — this takes several minutes…", () =>
-                buildApplication(mission.id),
+              void run(
+                "Generating application in E2B — this takes several minutes…",
+                withMissionPolling(mission.id, () => buildApplication(mission.id)),
+                undefined,
+                "build",
               )
             }
             disabled={busy !== null}
-            className="mt-2 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+            className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
           >
             Build application
           </button>
@@ -746,12 +824,15 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
                 <button
                   type="button"
                   onClick={() =>
-                    void run("Repairing and retesting in E2B — this takes several minutes…", () =>
-                      repairApplication(mission.id),
+                    void run(
+                      "Repairing and retesting in E2B — this takes several minutes…",
+                      withMissionPolling(mission.id, () => repairApplication(mission.id)),
+                      undefined,
+                      "repair",
                     )
                   }
                   disabled={busy !== null}
-                  className="mt-2 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+                  className="mt-2 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
                 >
                   Repair &amp; retest (one attempt)
                 </button>
@@ -782,8 +863,10 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
           {mission !== null && (
             <button
               type="button"
-              onClick={() => void run("Reloading mission…", () => getMission(mission.id))}
-              className="mt-2 border border-stone-300 px-4 py-2 font-medium"
+              onClick={() =>
+                void run("Reloading mission…", () => getMission(mission.id), undefined, "reload")
+              }
+              className="mt-2 rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment"
             >
               Reload mission
             </button>

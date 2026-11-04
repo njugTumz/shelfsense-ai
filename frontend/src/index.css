@@ -1,8 +1,38 @@
 @import "tailwindcss";
 
-body {
-  background-color: #ffffff;
-  color: #1c1917;
-  font-family:
+@theme {
+  --color-cream: #faf6ef;
+  --color-parchment: #f3ecdf;
+  --color-clay-50: #fbf1ea;
+  --color-clay-100: #f5ded0;
+  --color-clay-600: #b34a2e;
+  --color-clay-700: #93391f;
+  --color-clay-800: #752d19;
+  --color-moss-100: #e3efe3;
+  --color-moss-700: #2f6b3a;
+  --color-moss-800: #24552f;
+  --font-sans:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  background-color: var(--color-cream);
+  color: #292524;
+  font-family: var(--font-sans);
+}
+
+@keyframes field-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.field-spinner {
+  animation: field-spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .field-spinner {
+    animation: none;
+  }
 }

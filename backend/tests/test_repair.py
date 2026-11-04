@@ -274,7 +274,7 @@ def test_repair_success_flips_failed_to_verified(db_path, monkeypatch) -> None:
     monkeypatch.setattr(repair_module, "repair_application_files", fake_repair)
     monkeypatch.setattr(
         pipeline_module, "verify_in_e2b",
-        lambda files, acceptance_criteria=None: _e2b(
+        lambda files, acceptance_criteria=None, progress=None: _e2b(
             [_check("production_build", status=CheckStatus.PASS, detail="ok")],
             passed=True,
         ),
@@ -329,7 +329,7 @@ def test_repair_sources_exclude_scaffold_owned_files(db_path, monkeypatch) -> No
     monkeypatch.setattr(repair_module, "repair_application_files", fake_repair)
     monkeypatch.setattr(
         pipeline_module, "verify_in_e2b",
-        lambda files, acceptance_criteria=None: _e2b(
+        lambda files, acceptance_criteria=None, progress=None: _e2b(
             [_check("production_build", status=CheckStatus.PASS, detail="ok")],
             passed=True,
         ),
@@ -355,7 +355,7 @@ def test_repair_retest_still_failing_records_attempt(db_path, monkeypatch) -> No
     )
     monkeypatch.setattr(
         pipeline_module, "verify_in_e2b",
-        lambda files, acceptance_criteria=None: _e2b([_check("production_build")]),
+        lambda files, acceptance_criteria=None, progress=None: _e2b([_check("production_build")]),
     )
     monkeypatch.setattr(
         pipeline_module, "active_auditor",

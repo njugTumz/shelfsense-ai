@@ -18,6 +18,11 @@ from app.models.generation import GenerationOutput, validate_manifest
 from app.models.interview import StructuredRequirements
 from app.services.spark_client import responses_structured
 
+#: Output budget for code generation. High-effort reasoning tokens share
+#: this budget with the emitted files, so a full file set needs headroom
+#: above the 16k that truncated a production build (char ~6328 cut).
+DEVELOPER_MAX_OUTPUT_TOKENS = 32768
+
 DEVELOPER_SYSTEM = """\
 You are FIELD's developer. Implement the approved specification as a small \
 React + Vite + TypeScript single-page app. Aim for at most 12 files.
@@ -209,7 +214,7 @@ def generate_application(
         schema=DEVELOPER_SCHEMA,
         input_text=input_text,
         effort="high",
-        max_output_tokens=16384,
+        max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
     )
     try:
         output = GenerationOutput.model_validate(data)
@@ -223,7 +228,7 @@ def generate_application(
                 f"DeveloperOutput JSON."
             ),
             effort="high",
-            max_output_tokens=16384,
+            max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
         )
         try:
             output = GenerationOutput.model_validate(data)
@@ -276,7 +281,7 @@ def repair_application_files(
         schema=DEVELOPER_SCHEMA,
         input_text=input_text,
         effort="high",
-        max_output_tokens=16384,
+        max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
     )
     try:
         output = GenerationOutput.model_validate(data)
@@ -290,7 +295,7 @@ def repair_application_files(
                 f"DeveloperOutput JSON."
             ),
             effort="high",
-            max_output_tokens=16384,
+            max_output_tokens=DEVELOPER_MAX_OUTPUT_TOKENS,
         )
         try:
             output = GenerationOutput.model_validate(data)

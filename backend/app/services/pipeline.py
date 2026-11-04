@@ -67,9 +67,21 @@ def run_mission_verification(
     mission.status = MissionStatus.RUNNING
     save_mission(mission, db_path)
 
-    e2b = verify_in_e2b(resolved, acceptance_criteria=mission.acceptance_criteria)
+    def report_progress(step: str, label: str) -> None:
+        current = load_mission(mission_id, db_path)
+        if current is None:
+            return
+        current.progress_step = step
+        current.progress_label = label
+        save_mission(current, db_path)
+
+    e2b = verify_in_e2b(
+        resolved, acceptance_criteria=mission.acceptance_criteria, progress=report_progress
+    )
 
     mission.status = MissionStatus.AUDITING
+    mission.progress_step = "auditing"
+    mission.progress_label = "Running the independent Muse Spark audit…"
     save_mission(mission, db_path)
 
     check_lines = [
@@ -115,5 +127,7 @@ def run_mission_verification(
             ).strip()
     elif status == MissionStatus.AUDIT_LIMITED:
         mission.error = f"Independent AI audit unavailable: {audit.error}".strip()
+    mission.progress_step = ""
+    mission.progress_label = ""
     save_mission(mission, db_path)
     return mission

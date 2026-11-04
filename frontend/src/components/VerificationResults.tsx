@@ -6,7 +6,7 @@ import {
 } from "../services/api.ts";
 
 const RESULT_COPY: Record<string, { title: string; tone: string }> = {
-  VERIFIED: { title: "Verified", tone: "text-green-800" },
+  VERIFIED: { title: "Verified", tone: "text-moss-800" },
   VERIFIED_WITH_WARNINGS: { title: "Verified with warnings", tone: "text-amber-800" },
   FAILED: { title: "Failed", tone: "text-red-800" },
   AUDIT_LIMITED: { title: "Audit limited", tone: "text-amber-800" },
@@ -20,7 +20,7 @@ function checkGlyph(status: string): string {
 
 function statusTone(status: string): string {
   if (status === "pass" || status === "implemented" || status === "supported")
-    return "text-green-800";
+    return "text-moss-800";
   if (status === "fail") return "text-red-800";
   return "text-stone-500";
 }
@@ -82,7 +82,7 @@ function E2BResults({ e2b }: { e2b: E2BVerification }) {
 
 function FindingCard({ finding }: { finding: AuditFinding }) {
   return (
-    <li className="border border-stone-200 p-3">
+    <li className="border border-stone-200 bg-white p-3 rounded-lg">
       <p className="text-sm font-semibold tracking-wide text-stone-700 uppercase">
         {finding.severity} · {finding.category}
         {finding.file !== "" ? ` · ${finding.file}` : ""}

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import InterviewFlow from "./components/InterviewFlow.tsx";
 import VerificationResults from "./components/VerificationResults.tsx";
+import WorkflowProgress from "./components/WorkflowProgress.tsx";
 import {
   createDemoMission,
   getHealth,
+  getMission,
   verifyMission,
   type HealthStatus,
   type Mission,
@@ -32,6 +34,7 @@ const WORKFLOW_STAGES = [
 export default function App() {
   const [backend, setBackend] = useState<BackendState>({ kind: "loading" });
   const [verify, setVerify] = useState<VerifyState>({ kind: "idle" });
+  const [pollMission, setPollMission] = useState<Mission | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -48,14 +51,22 @@ export default function App() {
 
   async function runDemoVerification() {
     setVerify({ kind: "running", stage: "Creating demo mission…" });
+    setPollMission(null);
+    let handle = 0;
     try {
       const mission = await createDemoMission();
       setVerify({ kind: "running", stage: "Building and testing in E2B — this takes a few minutes…" });
+      handle = window.setInterval(() => {
+        void getMission(mission.id).then(setPollMission).catch(() => undefined);
+      }, 3000);
       const verified = await verifyMission(mission.id, { use_demo_app: true });
+      setPollMission(verified);
       setVerify({ kind: "done", mission: verified });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "Unknown verification error";
       setVerify({ kind: "failed", message });
+    } finally {
+      if (handle !== 0) window.clearInterval(handle);
     }
   }
 
@@ -63,7 +74,7 @@ export default function App() {
     <div className="min-h-screen">
       <header className="border-b border-stone-200">
         <div className="mx-auto max-w-3xl px-4 py-6">
-          <h1 className="text-2xl font-bold tracking-tight text-green-900">
+          <h1 className="text-2xl font-bold tracking-tight text-clay-800">
             FIELD
           </h1>
           <p className="mt-1 text-base text-stone-600">
@@ -73,14 +84,14 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-3xl px-4 py-8">
-        <section aria-label="Backend status" className="border border-stone-200 p-5">
+        <section aria-label="Backend status" className="border border-stone-200 bg-white p-5 rounded-xl shadow-sm">
           <h2 className="text-lg font-semibold">Backend status</h2>
           {backend.kind === "loading" && (
             <p className="mt-2 text-stone-600">Checking backend health…</p>
           )}
           {backend.kind === "online" && (
             <p className="mt-2">
-              <span className="font-medium text-green-800">Online</span>
+              <span className="font-medium text-moss-800">Online</span>
               <span className="text-stone-600">
                 {" "}
                 — {backend.health.service} (env: {backend.health.env})
@@ -99,12 +110,12 @@ export default function App() {
           )}
         </section>
 
-        <section aria-label="Interview and requirements" className="mt-8 border border-stone-200 p-5">
+        <section aria-label="Interview and requirements" className="mt-8 border border-stone-200 bg-white p-5 rounded-xl shadow-sm">
           <h2 className="text-lg font-semibold">Interview &amp; requirements</h2>
           <InterviewFlow backendOnline={backend.kind === "online"} />
         </section>
 
-        <section aria-label="Verification demo" className="mt-8 border border-stone-200 p-5">
+        <section aria-label="Verification demo" className="mt-8 border border-stone-200 bg-white p-5 rounded-xl shadow-sm">
           <h2 className="text-lg font-semibold">Verification demo</h2>
           <p className="mt-2 text-sm text-stone-600">
             Runs the full VERIFY stage against the reference restaurant
@@ -117,13 +128,18 @@ export default function App() {
               type="button"
               onClick={() => void runDemoVerification()}
               disabled={backend.kind !== "online"}
-              className="mt-4 bg-green-900 px-4 py-2 font-medium text-white disabled:opacity-50"
+              className="mt-4 bg-clay-600 px-4 py-2 font-medium text-white rounded-md hover:bg-clay-700 disabled:opacity-50 disabled:hover:bg-clay-600"
             >
               Run verification
             </button>
           )}
           {verify.kind === "running" && (
-            <p className="mt-4 text-stone-700">{verify.stage}</p>
+            <div className="mt-4">
+              <p className="text-stone-700">{verify.stage}</p>
+              <div className="mt-3">
+                <WorkflowProgress mission={pollMission} inFlight={null} />
+              </div>
+            </div>
           )}
           {verify.kind === "failed" && (
             <div className="mt-4">
@@ -132,7 +148,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setVerify({ kind: "idle" })}
-                className="mt-3 border border-stone-300 px-4 py-2 font-medium"
+                className="mt-3 rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment"
               >
                 Try again
               </button>
@@ -154,7 +170,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setVerify({ kind: "idle" })}
-                className="mt-4 border border-stone-300 px-4 py-2 font-medium"
+                className="mt-4 rounded-md border border-stone-300 bg-white px-4 py-2 font-medium hover:bg-parchment"
               >
                 Run again
               </button>

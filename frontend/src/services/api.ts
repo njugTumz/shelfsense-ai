@@ -273,6 +273,8 @@ export interface Mission {
   spec: StructuredRequirements | null;
   approved_at: string;
   is_approved: boolean;
+  progress_step: string;
+  progress_label: string;
 }
 
 const API_URL =

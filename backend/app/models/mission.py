@@ -59,6 +59,8 @@ class Mission(BaseModel):
     generation: GenerationRecord | None = None
     repair: RepairRecord | None = None
     media: MediaRecord | None = None
+    progress_step: str = ""
+    progress_label: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property

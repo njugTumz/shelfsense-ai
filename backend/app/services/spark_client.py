@@ -26,6 +26,30 @@ class SparkUnavailableError(SparkError):
     """Credentials/model ID are not configured; no call was attempted."""
 
 
+class SparkTruncatedError(SparkError):
+    """The provider cut the response short (e.g. output token budget).
+
+    Carries safe diagnostics only: the provider's stop reason, the
+    received character count, and token usage. Never prompt contents.
+    """
+
+    def __init__(self, reason: str, output_chars: int, usage: dict[str, int]):
+        self.reason = reason
+        self.output_chars = output_chars
+        self.usage = usage
+        super().__init__(
+            f"truncated response (reason={reason}, output_chars={output_chars}, "
+            f"output_tokens={usage.get('output_tokens', '?')})"
+        )
+
+
+#: Upper bound for the one-shot budget escalation on truncation. Well
+#: under the documented 131k model maximum.
+MAX_OUTPUT_ESCALATION_CAP = 65536
+
+USAGE_KEYS = ("input_tokens", "output_tokens", "reasoning_tokens")
+
+
 def _extract_output_text(payload: dict) -> str:
     for item in payload.get("output", []):
         if item.get("type") == "message":
@@ -52,12 +76,44 @@ def _post_responses(
     if response.status_code != 200:
         raise SparkError(f"HTTP {response.status_code}: {response.text[:1000]}")
     payload = response.json()
+    text = _extract_output_text(payload)
+    raw_usage = payload.get("usage", {}) or {}
+    usage = {k: raw_usage[k] for k in USAGE_KEYS if k in raw_usage}
+    if payload.get("status") == "incomplete":
+        details = payload.get("incomplete_details") or {}
+        raise SparkTruncatedError(details.get("reason", "unknown"), len(text), usage)
     try:
-        data = json.loads(_extract_output_text(payload))
+        data = json.loads(text)
     except ValueError as exc:
-        raise SparkError(f"malformed JSON: {exc}") from exc
-    usage = payload.get("usage", {}) or {}
-    return data, {k: usage.get(k, 0) for k in ("input_tokens", "output_tokens") if k in usage}
+        if _smells_truncated(exc):
+            raise SparkTruncatedError("suspected_truncation", len(text), usage) from exc
+        raise SparkError(f"malformed JSON: {exc} (output_chars={len(text)})") from exc
+    return data, usage
+
+
+#: json.decode errors that mean "cut off mid-stream" rather than "wrong
+#: shape". Schema-constrained output is structurally valid, so these
+#: almost always indicate budget exhaustion even without an explicit
+#: incomplete flag from the provider.
+_TRUNCATION_SIGNATURES = (
+    "Unterminated string",
+    "Expecting ',' delimiter",
+    "Expecting property name enclosed in double quotes",
+)
+
+
+def _smells_truncated(exc: ValueError) -> bool:
+    message = str(exc)
+    return any(sig in message for sig in _TRUNCATION_SIGNATURES)
+
+
+def _exhausted_error(second: SparkTruncatedError, cap: int) -> SparkError:
+    """Clear terminal error when the escalated retry also truncates."""
+    return SparkError(
+        f"response truncated by the output token budget on both attempts "
+        f"(reason={second.reason}, output_chars={second.output_chars}, "
+        f"escalated_cap={cap}); safe to retry"
+    )
 
 
 def _require_spark() -> None:
@@ -79,8 +135,11 @@ def responses_structured(
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Run one structured-output call. Returns (parsed_json, usage).
 
-    Retries once with a corrective instruction when the model returns
-    malformed JSON (plan.md section 9). Raises SparkError otherwise.
+    Bounded recovery (at most two provider calls): a truncated response
+    is retried once with a doubled output budget and the original input
+    (a corrective note cannot fix a cap problem); complete-but-invalid
+    JSON is retried once with a corrective instruction (plan.md §9).
+    Raises SparkError otherwise.
     """
     _require_spark()
     settings = get_settings()
@@ -99,22 +158,33 @@ def responses_structured(
         "max_output_tokens": max_output_tokens,
         "store": False,
     }
-    last_error = ""
-    current_input: Any = input_text
-    for attempt in (1, 2):
-        body["input"] = current_input
+    try:
+        return _post_responses(body, timeout_s)
+    except SparkTruncatedError:
+        escalated = min(max_output_tokens * 2, MAX_OUTPUT_ESCALATION_CAP)
+        retry_body = {**body, "input": input_text, "max_output_tokens": escalated}
         try:
-            return _post_responses(body, timeout_s)
-        except SparkError as exc:
-            if not str(exc).startswith("malformed JSON"):
-                raise
-            last_error = f"malformed JSON (attempt {attempt}): {exc}"
-            current_input = (
+            return _post_responses(retry_body, timeout_s)
+        except SparkTruncatedError as second:
+            raise _exhausted_error(second, escalated) from second
+    except SparkError as exc:
+        if not str(exc).startswith("malformed JSON"):
+            raise
+        retry_body = {
+            **body,
+            "input": (
                 f"{input_text}\n\nYour previous reply was not valid "
                 f"{schema_name} JSON ({exc}). Reply again with ONLY valid "
                 f"{schema_name} JSON."
-            )
-    raise SparkError(last_error)
+            ),
+        }
+        try:
+            return _post_responses(retry_body, timeout_s)
+        except SparkError as second:
+            raise SparkError(
+                f"model returned invalid JSON on both attempts ({second}); "
+                f"safe to retry"
+            ) from second
 
 
 def responses_structured_multimodal(
@@ -132,7 +202,8 @@ def responses_structured_multimodal(
     so the model can reference frames (verified shape: ``input_image``
     blocks with base64 ``data:`` URLs inside one user message).
 
-    Retries once on malformed JSON by resending with a corrective note.
+    Retries once on malformed JSON by resending with a corrective note,
+    or once with a doubled output budget on truncation (original input).
     Raises SparkError otherwise.
     """
     _require_spark()
@@ -161,6 +232,13 @@ def responses_structured_multimodal(
     }
     try:
         return _post_responses(body, timeout_s)
+    except SparkTruncatedError:
+        escalated = min(max_output_tokens * 2, MAX_OUTPUT_ESCALATION_CAP)
+        body["max_output_tokens"] = escalated
+        try:
+            return _post_responses(body, timeout_s)
+        except SparkTruncatedError as second:
+            raise _exhausted_error(second, escalated) from second
     except SparkError as exc:
         if not str(exc).startswith("malformed JSON"):
             raise
@@ -170,4 +248,10 @@ def responses_structured_multimodal(
             f"Reply again with ONLY valid {schema_name} JSON.",
         })
         body["input"] = [{"type": "message", "role": "user", "content": content}]
-        return _post_responses(body, timeout_s)
+        try:
+            return _post_responses(body, timeout_s)
+        except SparkError as second:
+            raise SparkError(
+                f"model returned invalid JSON on both attempts ({second}); "
+                f"safe to retry"
+            ) from second

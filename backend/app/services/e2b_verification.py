@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -80,7 +81,9 @@ def _skipped(name: str, category: CheckCategory, detail: str) -> VerificationChe
 
 
 def verify_in_e2b(
-    files: dict[str, str], acceptance_criteria: list[str] | None = None
+    files: dict[str, str],
+    acceptance_criteria: list[str] | None = None,
+    progress: Callable[[str, str], None] | None = None,
 ) -> E2BVerification:
     """Build and verify ``files`` (absolute sandbox path -> content).
 
@@ -88,7 +91,17 @@ def verify_in_e2b(
     workflow files; otherwise they are honestly SKIPPED, never faked.
     Browser workflow steps are required only when the acceptance criteria
     demand them (see browser_workflow.determine_required_steps).
+    ``progress`` receives (step_key, label) before each long stage so the
+    UI can poll real progress; it is best-effort and never fails checks.
     """
+
+    def emit(step: str, label: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(step, label)
+        except Exception:  # noqa: BLE001 - progress must never break verification
+            pass
     started = time.perf_counter()
     settings = get_settings()
     if not settings.e2b_configured:
@@ -112,6 +125,7 @@ def verify_in_e2b(
     sbx = None
     preview_url = ""
     try:
+        emit("e2b_sandbox", "Preparing the E2B sandbox…")
         t0 = time.perf_counter()
         sbx = Sandbox.create(timeout=SANDBOX_TIMEOUT_S, api_key=settings.e2b_api_key)
         checks.append(
@@ -168,6 +182,7 @@ def verify_in_e2b(
             )
         )
 
+        emit("e2b_install", "Installing dependencies in E2B…")
         install, install_err, dt = run(
             "npm_install", "npm install --no-audit --no-fund", cwd=APP_ROOT, timeout=COMMAND_TIMEOUT_S
         )
@@ -183,6 +198,7 @@ def verify_in_e2b(
         if install is None:
             return _done(checks, preview_url, sbx.sandbox_id, started, "npm install failed.")
 
+        emit("e2b_build", "Building the React application…")
         build, build_err, dt = run("build", "npm run build", cwd=APP_ROOT, timeout=COMMAND_TIMEOUT_S)
         checks.append(
             _check(
@@ -196,6 +212,7 @@ def verify_in_e2b(
         if build is None:
             return _done(checks, preview_url, sbx.sandbox_id, started, "Production build failed.")
 
+        emit("e2b_preview", "Starting the preview server…")
         t0 = time.perf_counter()
         sbx.commands.run(
             "npm run preview -- --port 5173 --host 0.0.0.0",
@@ -310,6 +327,7 @@ def verify_in_e2b(
             )
 
         required_steps = determine_required_steps(acceptance_criteria)
+        emit("browser_tests", "Running real browser workflow tests…")
         setup_error = ""
         for label, cmd, cmd_timeout in BROWSER_SETUP_COMMANDS:
             _, err, _ = run(label, cmd, timeout=cmd_timeout)
