@@ -4,8 +4,9 @@ FIELD is an AI software team that turns observations of a real-world
 environment into useful software. A business owner uploads a short video of an
 operation; FIELD analyses the visual and audio evidence, asks clarifying
 questions, produces an approved specification, generates a working application,
-runs it in an isolated E2B sandbox, and independently reviews it with Muse
-Glimmer.
+runs it in an isolated E2B sandbox, and independently reviews it with an
+adversarial Muse Spark audit (Muse Glimmer preserved as the intended
+auditor, not verified).
 
 This repository is the 24-hour hackathon MVP. See [plan.md](plan.md) for the
 full product plan. The demo scenario is a restaurant order-management
@@ -17,7 +18,7 @@ dashboard; the restaurant is a demonstration scenario, not a product limit.
 - Backend: Python, FastAPI, Pydantic
 - Persistence: SQLite (MVP)
 - AI: Muse Spark + Voice Transcribe via Meta Model API
-- Audit: Muse Glimmer on Modal (independent review)
+- Audit: adversarial Muse Spark (verified); Muse Glimmer on Modal preserved, not verified
 - Execution: E2B sandboxes for generated apps
 - Optional: Azure AI Speech TTS for the spoken walkthrough
 
@@ -148,6 +149,68 @@ Run the demo from the UI ("Run verification") or via the API:
 `{"use_demo_app": true}`. The reference restaurant app is a controlled
 starter for the demo; it is not claimed to be model-generated.
 
+## AI Models & Intelligence Architecture
+
+FIELD's intelligence comes from Meta models invoked with real provider
+requests at each pipeline stage. The models below are distinct from the
+infrastructure and tools that host, execute, and test the software they
+produce (listed separately at the end of this section). Model IDs and
+request shapes are verified against official docs in
+[docs/integration-notes.md](docs/integration-notes.md).
+
+### Muse Spark 1.3 (`muse-spark-1.3`)
+
+Called via the Responses API with structured JSON output. Verified by
+real calls across six roles:
+
+- Multimodal visual analysis of extracted business-video frames.
+- Interpretation and synthesis of visual evidence.
+- Contextual owner interviews and follow-up questions (maximum 3).
+- Structured requirements and specification generation.
+- Constrained React application generation (`src/` only).
+- Post-build independent adversarial audit of generated applications.
+
+### Muse Voice Transcribe (`muse-voice-transcribe-1.0`)
+
+Called via file transcription in ENDPOINTING mode (24 kHz mono WAV).
+Verified against a real recording by the `transcribe` smoke test:
+
+- Transcribes spoken narration from uploaded business videos.
+- Provides textual evidence combined with visual observations and
+  owner answers.
+- Supports the OBSERVED / STATED / INFERRED evidence model:
+  narration is STATED evidence, never OBSERVED.
+
+### Muse Glimmer — NOT VERIFIED
+
+Intended role: independent application/code auditing through Modal.
+Status: **NOT VERIFIED.** The Modal deployment reached model-loading
+stages but never successfully served inference. Glimmer was not used
+to produce any FIELD verification verdict; every verdict comes from
+deterministic E2B checks plus the adversarial Spark audit. The
+integration code is preserved under `scripts/smoke/` for a future
+retry with unblocked GPU quota.
+
+### Why Meta models are central
+
+Meta models let FIELD move from multimodal real-world input (video
+frames plus spoken narration) to structured reasoning, testable
+requirements, and generated software. They are part of the actual
+product workflow — evidence analysis, interviewing, specification,
+code generation, and audit — not decorative chatbot integrations.
+
+### Technology stack (infrastructure and tools, not AI models)
+
+| Technology | Role |
+|---|---|
+| React, Vite, TypeScript | Frontend |
+| Python, FastAPI | Backend orchestration |
+| FFmpeg | Video and audio processing |
+| E2B | Isolated execution of generated applications |
+| Playwright with Firefox | Real browser workflow testing |
+| SQLite | Initial mission persistence |
+| Caddy | HTTPS and reverse proxy in the Azure deployment |
+
 ## Current capabilities
 
 Implemented and tested with real provider calls:
@@ -182,9 +245,13 @@ Implemented but not yet connected end-to-end:
   generated-app builds.
 - Labeled demo observations remain as a development/testing path for
   missions without an uploaded video; real missions refuse the fixture.
+- One-cycle repair service (`POST /api/missions/{id}/repair`) is
+  implemented with passing keyless tests, and a live repair+retest
+  test exists; the repair path was not exercised in the production
+  validation run.
 
 Still planned (per `plan.md`): additional workflow test types beyond
-the restaurant flow, repair loop, presentation/TTS.
+the restaurant flow, presentation/TTS.
 
 ## Hackathon judging criteria
 
@@ -276,6 +343,23 @@ VERIFIED result with evidence
 A reference-app verification demo also remains available. Video
 ingestion is proven by a live end-to-end mission test on the sample
 restaurant video, alongside the original provider smoke tests.
+
+## Production Deployment
+
+FIELD is deployed on Azure and validated with a real end-to-end run:
+
+- Live URL: https://field-demo-k7q2.southafricanorth.azurecontainer.io
+- Azure Container Instances + Caddy (TLS terminator, static frontend,
+  API reverse proxy) with the FastAPI backend in one group.
+- Region: South Africa North.
+- Verified end-to-end production workflow: 462 seconds.
+- Final verdict: VERIFIED_WITH_WARNINGS.
+- Browser tests: 4 passed, 1 skipped (invalid-transition path).
+- Independent Muse Spark audit: PASS_WITH_WARNINGS.
+
+This is the observed result of the tested mission, not a guarantee:
+every mission is verified independently, and future missions can
+return different verdicts.
 
 ## Tests
 
