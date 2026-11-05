@@ -19,8 +19,10 @@ from app.models.interview import (
     StructuredRequirements,
 )
 from app.models.media import MediaRecord
+from app.models.jobs import JobRecord
 from app.models.mission import Mission, MissionStatus
 from app.services.build import build_application, cancel_build
+from app.services.jobs import active_job
 from app.services.repair import repair_application
 from app.services.interview import (
     LifecycleError,
@@ -251,6 +253,22 @@ def api_build_application(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{mission_id}/build/job", response_model=JobRecord)
+def api_build_job(mission_id: str) -> JobRecord:
+    """The mission's active background build job (worker liveness).
+
+    404 when no job is active (synchronous builds, finished runs, or
+    missions that never built). The UI reads status/heartbeat_at to
+    show worker activity; heartbeats older than the worker's stale
+    threshold mean the build may be stuck.
+    """
+    _mission_or_404(mission_id)
+    job = active_job(mission_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No active build job.")
+    return job
 
 
 @router.post("/{mission_id}/build/cancel", response_model=Mission)

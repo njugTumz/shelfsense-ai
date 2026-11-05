@@ -16,6 +16,7 @@ from collections.abc import Callable
 import httpx
 
 from app.core.config import get_settings
+from app.core.store import utc_now_iso
 from app.demo.restaurant_app import (
     APP_ROOT,
     BUNDLE_EVIDENCE_STRINGS,
@@ -69,6 +70,7 @@ def _check(
         required=required,
         detail=detail[:DETAIL_BUDGET],
         latency_s=round(latency_s, 1),
+        completed_at=utc_now_iso(),
     )
 
 

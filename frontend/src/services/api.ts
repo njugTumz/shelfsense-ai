@@ -13,6 +13,7 @@ export interface VerificationCheck {
   required: boolean;
   detail: string;
   latency_s: number;
+  completed_at: string;
 }
 
 export interface BrowserStep {
@@ -341,6 +342,41 @@ export async function createMission(name: string): Promise<Mission> {
 export async function getMission(missionId: string): Promise<Mission> {
   return request<Mission>(`/api/missions/${missionId}`);
 }
+
+export interface BuildJob {
+  id: string;
+  mission_id: string;
+  kind: string;
+  status: string;
+  attempt: number;
+  stages_done: string[];
+  heartbeat_at: string;
+  updated_at: string;
+  error: string;
+}
+
+export async function getBuildJob(missionId: string): Promise<BuildJob | null> {
+  try {
+    return await request<BuildJob>(`/api/missions/${missionId}/build/job`);
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message.includes("status 404")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** Mission statuses after which nothing more will change server-side. */
+export const TERMINAL_STATUSES = [
+  "VERIFIED",
+  "VERIFIED_WITH_WARNINGS",
+  "FAILED",
+  "AUDIT_LIMITED",
+  "INCONCLUSIVE",
+];
+
+/** Statuses where the backend itself is working (worth polling for). */
+export const MACHINE_ACTIVE_STATUSES = ["ANALYZING", "BUILDING", "RUNNING", "AUDITING"];
 
 export async function startInterview(
   missionId: string,

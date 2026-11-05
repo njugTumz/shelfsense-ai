@@ -111,7 +111,7 @@ export default function App() {
             <div className="mt-4">
               <p className="text-stone-700">{verify.stage}</p>
               <div className="mt-3">
-                <WorkflowProgress mission={pollMission} inFlight={null} />
+                <WorkflowProgress mission={pollMission} inFlight={null} job={null} lastUpdated={null} reconnecting={false} />
               </div>
             </div>
           )}

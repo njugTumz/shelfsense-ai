@@ -82,4 +82,6 @@ class Mission(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def is_approved(self) -> bool:
-        return self.status == MissionStatus.APPROVED and bool(self.approved_at)
+        # Sticky: approval happened (computed at read, so missions
+        # approved before this fix read True immediately, no migration).
+        return bool(self.approved_at)

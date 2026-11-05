@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from "react";
 import VerificationResults from "./VerificationResults.tsx";
 import WorkflowProgress from "./WorkflowProgress.tsx";
+import { useMissionPolling } from "../hooks/useMissionPolling.ts";
 import {
+  TERMINAL_STATUSES,
   analyzeMission,
   answerQuestion,
   approveRequirements,
@@ -220,7 +222,7 @@ function GenerationPanel({ generation }: { generation: GenerationRecord }) {
   );
 }
 
-const TERMINAL_BUILD_STATES = ["VERIFIED", "VERIFIED_WITH_WARNINGS", "FAILED", "AUDIT_LIMITED", "INCONCLUSIVE"];
+const TERMINAL_BUILD_STATES = TERMINAL_STATUSES;
 
 function isPreviewActive(preview: MissionPreview | null | undefined): boolean {
   if (preview == null || preview.preview_url === "") return false;
@@ -434,6 +436,11 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [mediaStage, setMediaStage] = useState<string | null>(null);
   const [inFlight, setInFlight] = useState<string | null>(null);
+  // Persistent refresh while the backend works (async builds included);
+  // also mirrors media status for the upload panel.
+  const live = useMissionPolling(mission, setMission, (current) => {
+    if (current.media !== null) setMediaStage(current.media.status);
+  });
 
   async function run(
     stage: string,
@@ -456,6 +463,9 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
     }
   }
 
+  // Action-scoped polling, kept ONLY for repair: the mission stays in a
+  // terminal (FAILED) status throughout, so the status-keyed live poller
+  // above does not run. Every other long action is covered by live polling.
   function withMissionPolling(missionId: string, action: () => Promise<Mission>) {
     return async (): Promise<Mission> => {
       const handle = window.setInterval(() => {
@@ -500,35 +510,17 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
     setFailure(null);
     setMediaStage("uploaded");
     (async () => {
-      let handle = 0;
       try {
         const created = await createMission("Video mission");
         const uploaded = await uploadVideo(created.id, file);
         setMission(uploaded);
         setBusy("Analyzing video — this takes a couple of minutes…");
         setInFlight("analyze");
-        const pending = analyzeMission(created.id);
-        handle = window.setInterval(() => {
-          void getMission(created.id)
-            .then((current) => {
-              setMission(current);
-              if (current.media !== null) {
-                setMediaStage(current.media.status);
-                if (current.media.status === "ready" || current.media.status === "failed") {
-                  window.clearInterval(handle);
-                }
-              }
-            })
-            .catch(() => undefined);
-        }, 3000);
-        const done = await pending;
-        window.clearInterval(handle);
-        handle = 0;
+        const done = await analyzeMission(created.id);
         setMediaStage(done.media?.status ?? null);
         setMission(done);
         setSelectedFile(null);
       } catch (error: unknown) {
-        if (handle !== 0) window.clearInterval(handle);
         setFailure(error instanceof Error ? error.message : "Unknown error");
       } finally {
         setBusy(null);
@@ -541,14 +533,6 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
     setBusy("Analyzing video — this takes a couple of minutes…");
     setInFlight("analyze");
     setFailure(null);
-    const handle = window.setInterval(() => {
-      void getMission(missionId)
-        .then((current) => {
-          setMission(current);
-          if (current.media !== null) setMediaStage(current.media.status);
-        })
-        .catch(() => undefined);
-    }, 3000);
     void analyzeMission(missionId)
       .then((done) => {
         setMediaStage(done.media?.status ?? null);
@@ -558,7 +542,6 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
         setFailure(error instanceof Error ? error.message : "Unknown error");
       })
       .finally(() => {
-        window.clearInterval(handle);
         setBusy(null);
         setInFlight(null);
       });
@@ -661,7 +644,13 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
       )}
 
       <div className="mt-3">
-        <WorkflowProgress mission={mission} inFlight={inFlight} />
+        <WorkflowProgress
+          mission={mission}
+          inFlight={inFlight}
+          job={live.job}
+          lastUpdated={live.lastUpdated}
+          reconnecting={live.reconnecting}
+        />
       </div>
 
       {mission !== null &&
@@ -835,11 +824,11 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
               onClick={() =>
                 void run(
                   "Recording approval…",
-                  withMissionPolling(mission.id, async () => {
+                  async () => {
                     const approved = await approveRequirements(mission.id);
                     setBusy("Generating application in E2B — this takes several minutes…");
                     return buildApplication(approved.id, false, crypto.randomUUID());
-                  }),
+                  },
                   undefined,
                   "build",
                 )
@@ -878,10 +867,7 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
             onClick={() =>
               void run(
                 "Generating application in E2B — this takes several minutes…",
-                withMissionPolling(
-                  mission.id,
-                  () => buildApplication(mission.id, false, crypto.randomUUID()),
-                ),
+                () => buildApplication(mission.id, false, crypto.randomUUID()),
                 undefined,
                 "build",
               )
@@ -899,8 +885,8 @@ export default function InterviewFlow({ backendOnline }: { backendOnline: boolea
         <div className="mt-2">
           <p className="text-stone-700">
             Build {mission.status.toLowerCase()}
-            {mission.progress_label !== "" ? ` — ${mission.progress_label}` : ""} Reloading
-            shows the latest state.
+            {mission.progress_label !== "" ? ` — ${mission.progress_label}` : ""} This page
+            refreshes automatically.
           </p>
           <button
             type="button"

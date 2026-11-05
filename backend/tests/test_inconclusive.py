@@ -347,11 +347,15 @@ def test_inconclusive_ui_contract() -> None:
     assert "transport_failed: boolean" in api
     assert "transport_retries: number" in api
 
-    for path, anchor in (
-        ("components/WorkflowProgress.tsx", "const TERMINAL = ["),
-        ("components/InterviewFlow.tsx", "const TERMINAL_BUILD_STATES = ["),
-    ):
-        source = _frontend(path)
-        line = next(
-            line for line in source.splitlines() if anchor in line)
-        assert '"INCONCLUSIVE"' in line, path
+    source = _frontend("components/WorkflowProgress.tsx")
+    line = next(
+        line for line in source.splitlines() if "const TERMINAL = [" in line)
+    assert '"INCONCLUSIVE"' in line, "WorkflowProgress terminal list"
+    # InterviewFlow aliases the shared list (single source of truth);
+    # the shared list itself must carry INCONCLUSIVE.
+    flow = _frontend("components/InterviewFlow.tsx")
+    assert "const TERMINAL_BUILD_STATES = TERMINAL_STATUSES;" in flow
+    shared = _frontend("services/api.ts")
+    start = shared.index("export const TERMINAL_STATUSES = [")
+    end = shared.index("];", start)
+    assert '"INCONCLUSIVE"' in shared[start:end]

@@ -45,6 +45,9 @@ class VerificationCheck(BaseModel):
     chain: list[str] = Field(default_factory=list)
     #: Per-hop durations in ms, in hop order (walker diagnostics).
     hop_durations_ms: list[int] = Field(default_factory=list)
+    #: Wall-clock completion of this check (ISO-8601); "" when unknown
+    #: (e.g. mapped browser checks, whose steps carry durations only).
+    completed_at: str = ""
 
 
 class BrowserStepStatus(str, Enum):

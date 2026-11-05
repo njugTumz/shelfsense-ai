@@ -1,4 +1,11 @@
-import type { E2BVerification, Mission } from "../services/api.ts";
+import { useEffect, useState } from "react";
+import {
+  MACHINE_ACTIVE_STATUSES,
+  TERMINAL_STATUSES,
+  type BuildJob,
+  type E2BVerification,
+  type Mission,
+} from "../services/api.ts";
 
 export type StepState = "done" | "active" | "pending" | "failed" | "skipped";
 
@@ -378,33 +385,180 @@ function StepGlyph({ state }: { state: StepState }) {
   );
 }
 
+//#region Tier 1 live progress
+// Phase weights for the overall estimate, roughly proportional to measured
+// machine time in stored runs (generation median ~3min, E2B verify ~2-7min
+// typical, up to ~11min with the lifecycle walker). Media processing and
+// audit have no stored durations, so their weights are small placeholders.
+// Interview/approval waits are user time and excluded. Skipped steps do not
+// count toward the denominator.
+const PHASE_WEIGHTS: Record<string, number> = {
+  See: 5,
+  Understand: 10,
+  Plan: 5,
+  Build: 45,
+  Test: 35,
+};
+
+const STALE_HEARTBEAT_S = 600;
+
+function useNow(tickMs: number, active: boolean): Date {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(new Date()), tickMs);
+    return () => window.clearInterval(timer);
+  }, [tickMs, active]);
+  return now;
+}
+
+function parseTime(iso: string): number | null {
+  if (iso === "") return null;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function formatDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
+  return `${sec}s`;
+}
+
+function formatClock(iso: string): string | null {
+  const ms = parseTime(iso);
+  if (ms === null) return null;
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Real completion timestamps only; steps without backend evidence show none. */
+function finishedAt(mission: Mission, stepKey: string): string {
+  const checks = mission.verification?.e2b.checks ?? [];
+  switch (stepKey) {
+    case "upload":
+      return mission.media?.created_at ?? "";
+    case "approval":
+      return mission.approved_at;
+    case "generate":
+    case "validate":
+      return mission.generation?.completed_at ?? "";
+    case "verdict":
+      return mission.verification?.completed_at ?? "";
+    default: {
+      const checkName = E2B_CHECK[stepKey];
+      if (checkName === undefined) return "";
+      return checks.find((c) => c.name === checkName)?.completed_at ?? "";
+    }
+  }
+}
+
+function estimatePercent(phases: ProgressPhase[]): number | null {
+  let scored = 0;
+  let total = 0;
+  for (const phase of phases) {
+    const weight = PHASE_WEIGHTS[phase.name] ?? 0;
+    const counted = phase.steps.filter((s) => s.state !== "skipped");
+    if (counted.length === 0) continue;
+    const perStep = weight / phase.steps.length;
+    for (const step of counted) {
+      total += perStep;
+      if (step.state === "done" || step.state === "failed") scored += perStep;
+      else if (step.state === "active") scored += perStep / 2;
+    }
+  }
+  if (total === 0) return null;
+  return Math.round((100 * scored) / total);
+}
+//#endregion Tier 1 live progress
+
 export default function WorkflowProgress({
   mission,
   inFlight,
+  job,
+  lastUpdated,
+  reconnecting,
 }: {
   mission: Mission | null;
   inFlight: string | null;
+  job: BuildJob | null;
+  lastUpdated: Date | null;
+  reconnecting: boolean;
 }) {
   const phases = derivePhases(mission, inFlight);
-  const activeStep = phases.flatMap((p) => p.steps).find((s) => s.state === "active");
-  const liveLabel =
-    mission !== null && mission.progress_label !== "" && activeStep !== undefined
-      ? mission.progress_label
-      : null;
+  const flatSteps = phases.flatMap((p) => p.steps);
+  const activeStep = flatSteps.find((s) => s.state === "active");
+  const status = mission?.status ?? "";
+  const terminal = TERMINAL_STATUSES.includes(status);
+  const machineActive = MACHINE_ACTIVE_STATUSES.includes(status);
+  const now = useNow(1000, machineActive || reconnecting);
+
+  const finished = flatSteps.filter(
+    (s) => s.state === "done" || s.state === "failed" || s.state === "skipped",
+  ).length;
+  const stepPosition = activeStep !== undefined ? Math.min(finished + 1, flatSteps.length) : finished;
+  const percent = mission === null ? null : estimatePercent(phases);
+
+  const createdMs = mission === null ? null : parseTime(mission.created_at);
+  const endMs = terminal && mission !== null ? (parseTime(mission.updated_at) ?? Date.now()) : now.getTime();
+  const elapsedS = createdMs === null ? null : Math.max(0, (endMs - createdMs) / 1000);
+
+  const heartbeatMs = job === null ? null : parseTime(job.heartbeat_at);
+  const heartbeatAgeS =
+    heartbeatMs === null ? null : Math.max(0, (now.getTime() - heartbeatMs) / 1000);
+  const workerStale =
+    job !== null && heartbeatAgeS !== null && heartbeatAgeS >= STALE_HEARTBEAT_S;
 
   return (
     <section aria-label="Workflow progress" className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm sm:p-5">
-      <h3 className="text-base font-semibold text-stone-900">Where your mission stands</h3>
+      <h3 className="text-base font-semibold text-stone-900">
+        Where your mission stands{percent !== null ? ` — ≈${percent}% (estimate)` : ""}
+      </h3>
       {activeStep !== undefined ? (
         <p className="mt-1 text-sm text-stone-700">
-          <span className="font-medium text-amber-800">Working on:</span>{" "}
-          {liveLabel ?? activeStep.label}…
+          <span className="font-medium text-amber-800">Working on:</span> {activeStep.label}…
         </p>
       ) : (
         <p className="mt-1 text-sm text-stone-500">
           {mission === null
             ? "Start with a video or a written brief — progress appears here."
             : "Waiting — nothing is running right now."}
+        </p>
+      )}
+      {mission !== null && (
+        <p className="mt-1 text-xs text-stone-500">
+          Step {stepPosition} of {flatSteps.length}
+          {elapsedS !== null && <> · elapsed {formatDuration(elapsedS)}</>}
+          <> · automated stages typically 4–15 min (generation 1.5–6, verify 2–11)</>
+        </p>
+      )}
+      {(machineActive || reconnecting) && (
+        <p className="mt-1 text-xs text-stone-500">
+          {reconnecting ? (
+            <span className="font-medium text-amber-800">
+              Reconnecting…{lastUpdated !== null ? ` last update ${formatDuration((now.getTime() - lastUpdated.getTime()) / 1000)} ago` : ""}
+            </span>
+          ) : lastUpdated !== null ? (
+            <>Updated {formatDuration((now.getTime() - lastUpdated.getTime()) / 1000)} ago</>
+          ) : (
+            <>Starting live updates…</>
+          )}
+        </p>
+      )}
+      {job !== null && (
+        <p className="mt-1 text-xs text-stone-500">
+          {workerStale ? (
+            <span className="font-medium text-red-800">
+              Worker silent for {formatDuration(heartbeatAgeS ?? 0)} (stale past {STALE_HEARTBEAT_S}s) —
+              the build may be stuck; it re-queues when the backend restarts.
+            </span>
+          ) : job.status === "queued" || heartbeatAgeS === null ? (
+            <>Worker: queued — picks up shortly…</>
+          ) : (
+            <>Worker {job.status} · heartbeat {formatDuration(heartbeatAgeS)} ago</>
+          )}
         </p>
       )}
       <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -432,6 +586,14 @@ export default function WorkflowProgress({
                       }
                     >
                       {step.label}
+                      {mission !== null &&
+                        (step.state === "done" || step.state === "failed") &&
+                        formatClock(finishedAt(mission, step.key)) !== null && (
+                          <span className="text-xs text-stone-400">
+                            {" · "}
+                            {formatClock(finishedAt(mission, step.key))}
+                          </span>
+                        )}
                     </span>
                     {step.state === "skipped" && (
                       <span className="block text-xs text-stone-400">
