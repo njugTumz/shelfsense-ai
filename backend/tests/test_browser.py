@@ -40,7 +40,7 @@ BUILD_CRITERIA = [
 
 
 def _report(*statuses: str) -> BrowserTestResult:
-    names = ("load", "create", "advance", "invalid", "persist", "console", "responsive", "storage")
+    names = ("load", "create", "advance", "invalid", "persist", "console", "responsive", "storage", "walk")
     return BrowserTestResult(
         available=True,
         browser="firefox test",
@@ -61,13 +61,13 @@ def test_browser_script_compiles_and_fills_all_fields() -> None:
 def test_applicability_from_criteria() -> None:
     demo = determine_required_steps(DEMO_CRITERIA)
     assert demo == {"load": True, "create": False, "advance": True, "invalid": True, "persist": False,
-                    "console": False, "responsive": False, "storage": False}
+                    "console": False, "responsive": False, "storage": False, "walk": True}
     build = determine_required_steps(BUILD_CRITERIA)
     assert build == {"load": True, "create": True, "advance": True, "invalid": False, "persist": True,
-                     "console": False, "responsive": False, "storage": False}
+                     "console": False, "responsive": False, "storage": False, "walk": True}
     assert determine_required_steps([]) == {
         "load": True, "create": False, "advance": False, "invalid": False, "persist": False,
-        "console": False, "responsive": False, "storage": False,
+        "console": False, "responsive": False, "storage": False, "walk": False,
     }
     assert determine_required_steps(None)["load"] is True
     # Quality signals never gate the verdict, whatever the criteria demand.
@@ -77,18 +77,20 @@ def test_applicability_from_criteria() -> None:
 
 def test_all_pass_maps_to_pass() -> None:
     required = determine_required_steps(BUILD_CRITERIA)
-    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 8), required)}
+    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 9), required)}
     assert checks["browser_loads_app"].status == CheckStatus.PASS
     assert checks["browser_creates_order"].status == CheckStatus.PASS
     assert checks["browser_creates_order"].required is True
     assert checks["browser_advances_status"].status == CheckStatus.PASS
     assert checks["browser_persists_after_reload"].status == CheckStatus.PASS
+    assert checks["browser_walks_full_lifecycle"].status == CheckStatus.PASS
+    assert checks["browser_walks_full_lifecycle"].required is True
     assert all("Real browser" in c.detail for c in checks.values())
 
 
 def test_skip_never_counts_as_pass() -> None:
     required = determine_required_steps(DEMO_CRITERIA)
-    report = _report("pass", "not_applicable", "pass", "pass", "fail", "pass", "pass", "pass")
+    report = _report("pass", "not_applicable", "pass", "pass", "fail", "pass", "pass", "pass", "pass")
     checks = {c.name: c for c in browser_steps_to_checks(report, required)}
     assert checks["browser_creates_order"].status == CheckStatus.SKIPPED
     assert checks["browser_creates_order"].required is False
@@ -101,7 +103,7 @@ def test_skip_never_counts_as_pass() -> None:
 def test_required_missing_workflow_fails() -> None:
     required = determine_required_steps(BUILD_CRITERIA)
     checks = {c.name: c for c in browser_steps_to_checks(
-        _report("pass", "not_applicable", "pass", "not_applicable", "pass", "pass", "pass", "pass"), required)}
+        _report("pass", "not_applicable", "pass", "not_applicable", "pass", "pass", "pass", "pass", "pass"), required)}
     assert checks["browser_creates_order"].status == CheckStatus.FAIL
     assert checks["browser_creates_order"].required is True
     assert "missing" in checks["browser_creates_order"].detail.lower()
@@ -110,16 +112,17 @@ def test_required_missing_workflow_fails() -> None:
 
 def test_required_failure_and_blocked_fail_verdict() -> None:
     required = determine_required_steps(BUILD_CRITERIA)
-    checks = browser_steps_to_checks(_report("pass", "pass", "fail", "not_applicable", "pass", "pass", "pass", "pass"), required)
+    checks = browser_steps_to_checks(_report("pass", "pass", "fail", "not_applicable", "pass", "pass", "pass", "pass", "pass"), required)
     by_name = {c.name: c for c in checks}
     assert by_name["browser_advances_status"].status == CheckStatus.FAIL
     assert summarize_e2b(checks) is False
 
-    blocked = browser_steps_to_checks(_report("fail", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked"), required)
+    blocked = browser_steps_to_checks(_report("fail", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked", "blocked"), required)
     by_blocked = {c.name: c for c in blocked}
     assert by_blocked["browser_loads_app"].status == CheckStatus.FAIL
     assert by_blocked["browser_creates_order"].status == CheckStatus.FAIL
     assert by_blocked["browser_rejects_invalid"].status == CheckStatus.SKIPPED
+    assert by_blocked["browser_walks_full_lifecycle"].status == CheckStatus.FAIL
     assert summarize_e2b(blocked) is False
 
 
@@ -127,7 +130,7 @@ def test_untestable_invalid_path_never_fails() -> None:
     required = determine_required_steps(DEMO_CRITERIA)
     assert required["invalid"] is True
     checks = {c.name: c for c in browser_steps_to_checks(
-        _report("pass", "not_applicable", "pass", "not_applicable", "fail", "pass", "pass", "pass"), required)}
+        _report("pass", "not_applicable", "pass", "not_applicable", "fail", "pass", "pass", "pass", "pass"), required)}
     assert checks["browser_rejects_invalid"].status == CheckStatus.SKIPPED
     assert checks["browser_rejects_invalid"].required is False
 
@@ -146,14 +149,14 @@ def test_quality_steps_map_to_non_gating_checks() -> None:
     from app.models.verification import CheckCategory
 
     required = determine_required_steps(BUILD_CRITERIA)
-    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 8), required)}
+    checks = {c.name: c for c in browser_steps_to_checks(_report(*["pass"] * 9), required)}
     for name in ("browser_console_clean", "browser_responsive_layout"):
         assert checks[name].status == CheckStatus.PASS
         assert checks[name].required is False
         assert checks[name].category == CheckCategory.QUALITY
 
     failed = {c.name: c for c in browser_steps_to_checks(
-        _report("pass", "pass", "pass", "not_applicable", "pass", "fail", "fail", "pass"), required)}
+        _report("pass", "pass", "pass", "not_applicable", "pass", "fail", "fail", "pass", "pass"), required)}
     assert failed["browser_console_clean"].status == CheckStatus.FAIL
     assert failed["browser_console_clean"].required is False
     assert failed["browser_responsive_layout"].status == CheckStatus.FAIL
@@ -592,7 +595,7 @@ def test_storage_check_never_gates_verdict() -> None:
     assert demanding["invalid"] is True
     assert demanding["storage"] is False
     checks = {c.name: c for c in browser_steps_to_checks(
-        _report("pass", "pass", "pass", "pass", "pass", "pass", "pass", "fail"), demanding)}
+        _report("pass", "pass", "pass", "pass", "pass", "pass", "pass", "fail", "pass"), demanding)}
     assert checks["browser_storage_holds_status"].status == CheckStatus.FAIL
     assert checks["browser_storage_holds_status"].required is False
     assert summarize_e2b(list(checks.values())) is True
@@ -654,5 +657,230 @@ def test_order_items_locator_resolves_exact_order_in_real_browser() -> None:
             assert base in text and sib not in text
             assert matched.first.locator("select").count() == 1
             assert order_items(page, sib).count() == 2
+        finally:
+            browser.close()
+
+
+# --- B2: lifecycle walker ---
+
+
+def test_walker_template_emits_structured_chain() -> None:
+    from app.services.browser_workflow import STEP_CHECK_NAMES
+
+    compile(BROWSER_SCRIPT, "browser_workflow.check.py", "exec")
+    assert STEP_CHECK_NAMES["walk"] == "browser_walks_full_lifecycle"
+    assert '# --- walk:' in BROWSER_SCRIPT
+    assert 'rec("walk", "pass"' in BROWSER_SCRIPT
+    assert 'rec("walk", "fail"' in BROWSER_SCRIPT
+    assert 'rec("walk", "blocked"' in BROWSER_SCRIPT
+    assert "chain=chain" in BROWSER_SCRIPT
+    for helper in ("first_with_advance_button", "next_forward_option", "read_display_status"):
+        assert helper in BROWSER_ASSERT_SOURCE
+        assert helper in BROWSER_SCRIPT
+    assert "next_forward_option(opts, current)" in BROWSER_SCRIPT
+    assert "verify_hop" in BROWSER_SCRIPT
+    assert "range(8)" in BROWSER_SCRIPT
+    assert "cycle detected at" in BROWSER_SCRIPT
+    assert "hop cap reached" in BROWSER_SCRIPT
+    assert "order left all lists" in BROWSER_SCRIPT
+    assert "input-gated at" in BROWSER_SCRIPT
+    assert "synthetic input filled at" in BROWSER_SCRIPT
+    walk_at = BROWSER_SCRIPT.index('# --- walk:')
+    assert BROWSER_SCRIPT.index('# --- persist:') < walk_at
+    assert walk_at < BROWSER_SCRIPT.index('# --- responsive:')
+
+
+def test_walk_required_matches_advance_gate() -> None:
+    """The walk is transition evidence at full range: required exactly
+    when the two-hop advance gate is, across arming and non-arming
+    criteria alike."""
+    cases = [
+        (BUILD_CRITERIA, True),
+        (DEMO_CRITERIA, True),
+        ([], False),
+        (["The application builds successfully."], False),
+        (["The board remains visible after page reload."], False),
+        (["Counter staff can create an order and it appears in the list."], False),
+        (["Invalid changes are rejected with a visible message."], False),
+        (["Kitchen view lists only Received and Preparing orders in arrival order."], True),
+        (["Status can be changed forward one step."], True),
+    ]
+    for criteria, expected in cases:
+        required = determine_required_steps(criteria)
+        assert required["advance"] is expected, criteria
+        assert required["walk"] is expected, criteria
+    persist_only = determine_required_steps(["The board remains visible after page reload."])
+    assert persist_only["persist"] is True
+    assert persist_only["walk"] is False
+    invalid_only = determine_required_steps(["Invalid changes are rejected with a visible message."])
+    assert invalid_only["invalid"] is True
+    assert invalid_only["walk"] is False
+
+
+def test_walk_chain_flows_to_check() -> None:
+    from app.models.verification import CheckCategory
+
+    report = BrowserTestResult(
+        available=True, browser="firefox test",
+        steps=[
+            BrowserStep(name="load", status="pass", chain=[]),
+            BrowserStep(
+                name="walk", status="pass", detail="walked Received -> Preparing",
+                chain=["Received", "Preparing"],
+            ),
+        ],
+    )
+    checks = {c.name: c for c in browser_steps_to_checks(report, {"walk": True})}
+    assert checks["browser_walks_full_lifecycle"].chain == ["Received", "Preparing"]
+    assert checks["browser_walks_full_lifecycle"].category == CheckCategory.FUNCTIONAL
+    failed = {c.name: c for c in browser_steps_to_checks(BrowserTestResult(
+        available=True, browser="firefox test",
+        steps=[BrowserStep(
+            name="walk", status="fail", detail="hop to Ready not shown",
+            chain=["Received", "Preparing"],
+        )],
+    ), {"walk": True})}
+    assert failed["browser_walks_full_lifecycle"].status == CheckStatus.FAIL
+    assert failed["browser_walks_full_lifecycle"].chain == ["Received", "Preparing"]
+
+
+def test_walk_failure_gates_verdict_only_when_required() -> None:
+    required = determine_required_steps(BUILD_CRITERIA)
+    assert required["walk"] is True
+    checks = browser_steps_to_checks(
+        _report("pass", "pass", "pass", "not_applicable", "pass", "pass", "pass", "pass", "fail"),
+        required,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["browser_walks_full_lifecycle"].status == CheckStatus.FAIL
+    assert by_name["browser_walks_full_lifecycle"].required is True
+    assert summarize_e2b(checks) is False
+
+    unrequired = determine_required_steps(["The board remains visible after page reload."])
+    assert unrequired["walk"] is False
+    checks = browser_steps_to_checks(
+        _report("pass", "pass", "pass", "not_applicable", "pass", "pass", "pass", "pass", "fail"),
+        unrequired,
+    )
+    by_name = {c.name: c for c in checks}
+    assert by_name["browser_walks_full_lifecycle"].status == CheckStatus.FAIL
+    assert by_name["browser_walks_full_lifecycle"].required is False
+    assert summarize_e2b(checks) is True
+
+
+def test_next_forward_option_matrix() -> None:
+    nxt = _assert_helpers()["next_forward_option"]
+    opts = [("Received", False), ("Preparing", False), ("Ready", False), ("Served", False)]
+    assert nxt(opts, "Received") == "Preparing"
+    assert nxt(opts, "Ready") == "Served"
+    assert nxt(opts, "Served") is None
+    assert nxt(opts, "Completed") is None
+    assert nxt(opts, None) is None
+    assert nxt([], "Received") is None
+    assert nxt(None, "Received") is None
+    skipped = [("Received", False), ("Preparing", True), ("Ready", False)]
+    assert nxt(skipped, "Received") == "Ready"
+    destructive = [("Received", False), ("Cancelled", False), ("Preparing", False)]
+    assert nxt(destructive, "Received") == "Preparing"
+    only_cancel = [("Received", False), ("Cancelled", False)]
+    assert nxt(only_cancel, "Received") is None
+    duplicate = [("Preparing", False), ("Preparing", False)]
+    assert nxt(duplicate, "Preparing") == "Preparing"
+
+
+def test_read_display_status_matrix() -> None:
+    read = _assert_helpers()["read_display_status"]
+    assert read("WALK-1 Status: Preparing Advance to Ready") == "Preparing"
+    assert read("ID x Status:Ready") == "Ready"
+    assert read("nothing to see here") is None
+    assert read("") is None
+    assert read(None) is None
+
+
+def test_first_with_advance_button_selects_candidate() -> None:
+    from unittest.mock import MagicMock
+
+    pick = _assert_helpers()["first_with_advance_button"]
+
+    def item(*labels):
+        buttons = []
+        for label in labels:
+            button = MagicMock()
+            button.inner_text.return_value = label
+            buttons.append(button)
+        candidate = MagicMock()
+        candidate.get_by_role.return_value.all.return_value = buttons
+        return candidate
+
+    plain = item("Delete")
+    advancable = item("Delete", "Advance to Ready")
+    assert pick([plain, advancable]) is advancable
+    assert pick([plain]) is None
+    assert pick([]) is None
+    assert pick(None) is None
+    broken = MagicMock()
+    broken.get_by_role.side_effect = Exception("stale")
+    assert pick([broken, advancable]) is advancable
+    flaky = MagicMock()
+    flaky.inner_text.side_effect = Exception("detached")
+    steady = MagicMock()
+    steady.inner_text.return_value = "Mark Served"
+    mixed = MagicMock()
+    mixed.get_by_role.return_value.all.return_value = [flaky, steady]
+    assert pick([mixed]) is mixed
+
+
+_WALK_FIXTURE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Walker fixture</title></head>
+<body><h1>Walker Diner</h1>
+<section aria-label="Kitchen queue"><ul>
+<li><p>WALK-1</p><p>Status: Received</p><button>Advance to Preparing</button></li>
+</ul></section>
+<section aria-label="Central order board"><ul>
+<li><p>WALK-1</p><p>Status: Received</p><select><option>Received</option><option>Preparing</option><option>Ready</option></select></li>
+<li><p>WALK-2</p><p>Status: Ready</p><p>No controls here</p></li>
+</ul></section>
+</body></html>"""
+
+
+def test_walker_helpers_resolve_fixture_controls_in_real_browser() -> None:
+    """Walker control resolution against real Chromium locators: the
+    select rendering resolves via first_with_select, the button
+    rendering via first_with_advance_button, and the control-less
+    rendering resolves via neither (terminal shape). Skips cleanly
+    when no browser is installed."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    helpers = _assert_helpers()
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch()
+        except Exception as exc:
+            pytest.skip(f"chromium not available: {exc}")
+        try:
+            page = browser.new_page()
+            page.set_content(_WALK_FIXTURE_HTML)
+            candidates = helpers["order_items"](page, "WALK-1").all()
+            assert len(candidates) == 2
+            selected = helpers["first_with_select"](candidates)
+            assert selected is not None
+            assert selected.locator("select").count() == 1
+            assert selected.locator("button").count() == 0
+            advanced = helpers["first_with_advance_button"](candidates)
+            assert advanced is not None
+            assert advanced.get_by_role("button").count() == 1
+            assert advanced.locator("select").count() == 0
+            sel = selected.locator("select").first
+            opts = []
+            for opt in sel.locator("option").all():
+                text = (opt.inner_text() or "").strip()
+                key = ((opt.get_attribute("value") or "") or text).strip()
+                opts.append((key, bool(opt.is_disabled())))
+            assert helpers["next_forward_option"](opts, sel.input_value()) == "Preparing"
+            terminal = helpers["order_items"](page, "WALK-2").all()
+            assert len(terminal) == 1
+            assert helpers["first_with_select"](terminal) is None
+            assert helpers["first_with_advance_button"](terminal) is None
         finally:
             browser.close()

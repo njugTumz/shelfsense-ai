@@ -50,6 +50,7 @@ STEP_CHECK_NAMES = {
     "storage": "browser_storage_holds_status",
     "invalid": "browser_rejects_invalid",
     "persist": "browser_persists_after_reload",
+    "walk": "browser_walks_full_lifecycle",
     "console": "browser_console_clean",
     "responsive": "browser_responsive_layout",
 }
@@ -180,6 +181,56 @@ def stored_statuses_for(dump, identifier):
         except Exception:
             continue
     return found
+
+
+def first_with_advance_button(candidates):
+    """First candidate containing an advance control; None when absent.
+
+    Sibling of first_with_select for button-driven renderings: a
+    candidate qualifies when any of its buttons parses to a status
+    target. Accepts any sequence of locator-likes.
+    """
+    for candidate in candidates or []:
+        try:
+            buttons = candidate.get_by_role("button").all()
+        except Exception:
+            continue
+        for button in buttons:
+            try:
+                name = button.inner_text() or ""
+            except Exception:
+                continue
+            if parse_button_target(name) is not None:
+                return candidate
+    return None
+
+
+def next_forward_option(options, current):
+    """Next lifecycle hop from a select's options; None at terminal.
+
+    ``options`` is a [(value_or_text, disabled)] list in DOM order.
+    Returns the first enabled option positioned after ``current``,
+    never Cancelled (destructive) and never backward (loops). An
+    unrecognized current status also yields None: stop, don't guess.
+    """
+    seen_current = False
+    for key, disabled in options or []:
+        if not seen_current:
+            if key == current:
+                seen_current = True
+            continue
+        if disabled:
+            continue
+        if key == "Cancelled":
+            continue
+        return key
+    return None
+
+
+def read_display_status(display_text):
+    """Status word from 'Status: X' display text; None when absent."""
+    match = re.search(r"Status:\s*([A-Za-z]+)", display_text or "")
+    return match.group(1) if match else None
 '''
 
 BROWSER_SCRIPT = r'''
@@ -192,9 +243,12 @@ import time
 from browser_assert import (
     button_moved_past,
     display_text_without_buttons,
+    first_with_advance_button,
     first_with_select,
+    next_forward_option,
     order_items,
     parse_button_target,
+    read_display_status,
     skip_option_state,
     status_shown_in_display,
     stored_statuses_for,
@@ -211,9 +265,9 @@ def main():
     steps = []
     shots = []
 
-    def rec(name, status, detail="", ms=0):
+    def rec(name, status, detail="", ms=0, chain=None):
         steps.append({"name": name, "status": status, "detail": detail[:800],
-                      "duration_ms": int(ms)})
+                      "duration_ms": int(ms), "chain": list(chain or [])})
 
     def shot(page, name):
         try:
@@ -319,7 +373,7 @@ def main():
             rec("load", "pass", f"loaded; heading: {heading}", (timed() - t0) * 1000)
         except Exception as exc:
             rec("load", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
-            for name in ("create", "advance", "storage", "invalid", "persist", "console", "responsive"):
+            for name in ("create", "advance", "storage", "invalid", "persist", "walk", "console", "responsive"):
                 rec(name, "blocked", "page did not load")
             return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
 
@@ -594,6 +648,159 @@ def main():
         except Exception as exc:
             rec("persist", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
+        # --- walk: advance through every reachable status to terminal ---
+        t0 = timed()
+        try:
+            if identifier is None:
+                rec("walk", "blocked", "no order identifier available", (timed() - t0) * 1000)
+            else:
+                fresh_load()
+                page.locator("h1").first.wait_for(state="visible")
+
+                def walk_status(item):
+                    sel = item.locator("select").first
+                    if sel.count() > 0:
+                        return sel.input_value() or None
+                    return read_display_status(item.inner_text() or "")
+
+                def verify_hop(target):
+                    found = order_items(page, identifier).all()
+                    if not found:
+                        return ("gone", None)
+                    current = first_with_select(found)
+                    if current is None:
+                        current = first_with_advance_button(found)
+                    if current is None:
+                        current = found[0]
+                    sel = current.locator("select").first
+                    if sel.count() > 0:
+                        value = sel.input_value() or None
+                        return ("ok" if value == target else "wrong", value)
+                    display = display_text_without_buttons(
+                        current.inner_text() or "",
+                        [t for t in current.get_by_role("button").all_inner_texts() if t],
+                    )
+                    if status_shown_in_display(display, target):
+                        return ("ok", target)
+                    return ("wrong", read_display_status(display))
+
+                chain = []
+                synthetic = []
+                start_items = order_items(page, identifier).all()
+                if not start_items:
+                    rec("walk", "fail", f"order {identifier!r} missing, cannot walk",
+                        (timed() - t0) * 1000, chain=chain)
+                else:
+                    start = walk_status(start_items[0])
+                    if start:
+                        chain.append(start)
+                    outcome = None
+                    for _hop in range(8):
+                        candidates = order_items(page, identifier).all()
+                        item = first_with_select(candidates)
+                        if item is None:
+                            item = first_with_advance_button(candidates)
+                        if item is None:
+                            outcome = "terminal: no advancable control"
+                            break
+                        sel = item.locator("select").first
+                        if sel.count() > 0:
+                            opts = []
+                            for opt in sel.locator("option").all():
+                                text = (opt.inner_text() or "").strip()
+                                key = ((opt.get_attribute("value") or "") or text).strip()
+                                try:
+                                    dis = bool(opt.is_disabled())
+                                except Exception:
+                                    dis = False
+                                opts.append((key, dis))
+                            current = sel.input_value() or None
+                            nxt = next_forward_option(opts, current)
+                            if nxt is None:
+                                outcome = f"terminal at {current}"
+                                break
+                            if nxt in chain:
+                                outcome = f"cycle detected at {nxt}"
+                                break
+                            sel.select_option(value=nxt)
+                            page.wait_for_timeout(400)
+                            result, now = verify_hop(nxt)
+                            if result == "ok":
+                                chain.append(nxt)
+                            elif result == "gone":
+                                outcome = (f"order left all lists after hop to {nxt}; "
+                                           "chain ends at last verified status")
+                                break
+                            else:
+                                rec("walk", "fail",
+                                    f"hop to {nxt} not shown (at {now}); "
+                                    f"walked {' -> '.join(chain)}",
+                                    (timed() - t0) * 1000, chain=chain)
+                                break
+                        else:
+                            btn = item.get_by_role("button", name=ADVANCE_BUTTON).first
+                            if btn.count() == 0:
+                                outcome = f"terminal at {chain[-1] if chain else 'unknown'}"
+                                break
+                            target = parse_button_target(btn.inner_text() or "")
+                            if target is None:
+                                outcome = "terminal: advance control has no parseable target"
+                                break
+                            if target in chain:
+                                outcome = f"cycle detected at {target}"
+                                break
+                            try:
+                                enabled = btn.is_enabled()
+                            except Exception:
+                                enabled = True
+                            if not enabled:
+                                filled = False
+                                fields = item.locator(
+                                    'input[type="text"], input[type="number"], '
+                                    'input:not([type]), textarea').all()
+                                for field in fields:
+                                    try:
+                                        if field.is_visible() and (field.input_value() or "") == "":
+                                            field.fill("1")
+                                            filled = True
+                                    except Exception:
+                                        continue
+                                if filled:
+                                    synthetic.append(chain[-1] if chain else "?")
+                                    page.wait_for_timeout(400)
+                                try:
+                                    enabled = btn.is_enabled()
+                                except Exception:
+                                    enabled = True
+                            if not enabled:
+                                outcome = f"input-gated at {chain[-1] if chain else 'unknown'}"
+                                break
+                            btn.click()
+                            page.wait_for_timeout(400)
+                            result, now = verify_hop(target)
+                            if result == "ok":
+                                chain.append(target)
+                            elif result == "gone":
+                                outcome = (f"order left all lists after hop to {target}; "
+                                           "chain ends at last verified status")
+                                break
+                            else:
+                                rec("walk", "fail",
+                                    f"hop to {target} not shown (at {now}); "
+                                    f"walked {' -> '.join(chain)}",
+                                    (timed() - t0) * 1000, chain=chain)
+                                break
+                    else:
+                        outcome = "hop cap reached"
+                    if outcome is not None:
+                        walked = " -> ".join(chain) if chain else "(no hops)"
+                        detail = f"walked {walked} [{outcome}]"
+                        if synthetic:
+                            detail += f" (synthetic input filled at: {', '.join(synthetic)})"
+                        rec("walk", "pass", detail, (timed() - t0) * 1000, chain=chain)
+        except Exception as exc:
+            rec("walk", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
         # --- responsive: mobile viewport loads without horizontal overflow ---
         t0 = timed()
         try:
@@ -640,7 +847,7 @@ except Exception as exc:  # never exit without a machine-readable report
     report = {"browser": "firefox (crashed)", "steps": [
         {"name": n, "status": "fail" if n == "load" else "blocked",
          "detail": f"runner crashed: {traceback.format_exc(limit=3)[-500:]}", "duration_ms": 0}
-        for n in ("load", "create", "advance", "storage", "invalid", "persist",
+        for n in ("load", "create", "advance", "storage", "invalid", "persist", "walk",
                   "console", "responsive")], "screenshots": []}
 print("BROWSER_JSON:" + json.dumps(report))
 '''
@@ -670,6 +877,9 @@ def determine_required_steps(acceptance_criteria: list[str] | None) -> dict[str,
         "load": True,
         "create": mentions(CREATE_KEYWORDS),
         "advance": mentions(ADVANCE_KEYWORDS),
+        # The lifecycle walk is the transition evidence at full range:
+        # required exactly when the advance gate is.
+        "walk": mentions(ADVANCE_KEYWORDS),
         # Storage dump is mechanism-specific (web storage only): an app
         # persisting via IndexedDB or a backend would fail it while
         # working, so it reports honestly but never gates the verdict.
