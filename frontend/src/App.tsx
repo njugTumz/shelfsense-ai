@@ -84,33 +84,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-3xl px-4 py-8">
-        <section aria-label="Backend status" className="border border-stone-200 bg-white p-5 rounded-xl shadow-sm">
-          <h2 className="text-lg font-semibold">Backend status</h2>
-          {backend.kind === "loading" && (
-            <p className="mt-2 text-stone-600">Checking backend health…</p>
-          )}
-          {backend.kind === "online" && (
-            <p className="mt-2">
-              <span className="font-medium text-moss-800">Online</span>
-              <span className="text-stone-600">
-                {" "}
-                — {backend.health.service} (env: {backend.health.env})
-              </span>
-            </p>
-          )}
-          {backend.kind === "offline" && (
-            <div className="mt-2">
-              <p className="font-medium text-red-800">Offline</p>
-              <p className="mt-1 text-sm text-stone-600">
-                Could not reach the backend: {backend.message}. Start it with{" "}
-                <code className="bg-stone-100 px-1">python -m app.main</code>{" "}
-                from the backend directory.
-              </p>
-            </div>
-          )}
-        </section>
-
-        <section aria-label="Interview and requirements" className="mt-8 border border-stone-200 bg-white p-5 rounded-xl shadow-sm">
+        <section aria-label="Interview and requirements" className="border border-stone-200 bg-white p-5 rounded-xl shadow-sm">
           <h2 className="text-lg font-semibold">Interview &amp; requirements</h2>
           <InterviewFlow backendOnline={backend.kind === "online"} />
         </section>
