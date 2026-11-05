@@ -220,7 +220,7 @@ function GenerationPanel({ generation }: { generation: GenerationRecord }) {
   );
 }
 
-const TERMINAL_BUILD_STATES = ["VERIFIED", "VERIFIED_WITH_WARNINGS", "FAILED", "AUDIT_LIMITED"];
+const TERMINAL_BUILD_STATES = ["VERIFIED", "VERIFIED_WITH_WARNINGS", "FAILED", "AUDIT_LIMITED", "INCONCLUSIVE"];
 
 function isPreviewActive(preview: MissionPreview | null | undefined): boolean {
   if (preview == null || preview.preview_url === "") return false;

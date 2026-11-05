@@ -19,8 +19,9 @@ from app.models.verification import VerificationResult
 class MissionStatus(str, Enum):
     """Plan section 6 state machine plus the smallest verification set.
 
-    VERIFIED_WITH_WARNINGS and AUDIT_LIMITED are the only additions the
-    VERIFY stage needs; FAILED captures which stage failed via ``error``.
+    VERIFIED_WITH_WARNINGS, AUDIT_LIMITED and INCONCLUSIVE are the only
+    additions the VERIFY stage needs; FAILED captures which stage
+    failed via ``error``.
     """
 
     CREATED = "CREATED"
@@ -35,6 +36,7 @@ class MissionStatus(str, Enum):
     VERIFIED = "VERIFIED"
     VERIFIED_WITH_WARNINGS = "VERIFIED_WITH_WARNINGS"
     AUDIT_LIMITED = "AUDIT_LIMITED"
+    INCONCLUSIVE = "INCONCLUSIVE"
     FAILED = "FAILED"
     PRESENTED = "PRESENTED"
 

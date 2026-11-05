@@ -1,0 +1,286 @@
+"""Keyless tests: INCONCLUSIVE verdict for sandbox-transport failures.
+
+Transport errors (ConnectError, stream errors, transient E2B SDK
+failures) retry once, then yield INCONCLUSIVE -- never FAILED.
+Executed assertion failures keep their current behaviour.
+"""
+
+import pytest
+
+from app.core.config import REPO_ROOT
+from app.models.verification import (
+    AuditFinding,
+    AuditResult,
+    AuditVerdict,
+    CheckCategory,
+    CheckStatus,
+    E2BVerification,
+    VerificationCheck,
+    VerificationStatus,
+    compute_verdict,
+)
+from app.services.browser_workflow import (
+    _is_transport_error,
+    _with_transport_retry,
+    run_browser_tests,
+)
+
+
+def _check(name, status, required=True):
+    return VerificationCheck(
+        name=name,
+        category=CheckCategory.BUILD,
+        status=status,
+        required=required,
+    )
+
+
+def _audit(verdict=None, findings=None):
+    return AuditResult(
+        provider="spark_adversarial",
+        available=True,
+        completed=True,
+        verdict=verdict,
+        findings=findings or [],
+    )
+
+
+def _finding(severity):
+    return AuditFinding(
+        severity=severity,
+        category="requirements",
+        finding="f",
+        evidence="e",
+        recommendation="r",
+    )
+
+
+def test_transport_taxonomy_httpx() -> None:
+    import httpx
+
+    for cls in (
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.PoolTimeout,
+    ):
+        assert _is_transport_error(cls("boom")) is True
+    assert _is_transport_error(ValueError("boom")) is False
+    assert _is_transport_error(AssertionError("boom")) is False
+
+
+def test_transport_taxonomy_e2b() -> None:
+    e2b = pytest.importorskip("e2b")
+
+    for name in (
+        "SandboxUnreachableException",
+        "SandboxNotRunningException",
+        "SandboxNotFoundException",
+        "TimeoutException",
+        "RateLimitException",
+        "ServiceBusyException",
+        "FileUploadException",
+    ):
+        assert _is_transport_error(getattr(e2b, name)("boom")) is True
+    # A command that ran and exited non-zero is measured evidence.
+    assert _is_transport_error(ValueError("exit=1")) is False
+    assert _is_transport_error(e2b.AuthenticationException("boom")) is False
+
+
+def test_retry_helper_retries_transport_once() -> None:
+    import httpx
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectError("boom")
+        return "ok"
+
+    slept = []
+    value, retries, error = _with_transport_retry(
+        flaky, delay_s=7, sleep=slept.append)
+    assert (value, retries, error) == ("ok", 1, None)
+    assert slept == [7]
+    assert len(calls) == 2
+
+
+def test_retry_helper_counts_terminal_failures() -> None:
+    import httpx
+
+    def always():
+        raise httpx.ConnectError("down")
+
+    value, retries, error = _with_transport_retry(always, delay_s=0, sleep=lambda s: None)
+    assert value is None
+    assert retries == 1
+    assert isinstance(error, httpx.ConnectError)
+
+    def app_error():
+        raise ValueError("bad")
+
+    value, retries, error = _with_transport_retry(app_error, delay_s=0, sleep=lambda s: None)
+    assert value is None
+    assert retries == 0
+    assert isinstance(error, ValueError)
+
+
+def _stub_commands(script):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    sbx = MagicMock()
+    sbx.commands.run.side_effect = script
+    sbx.files.read.side_effect = FileNotFoundError("no screenshots on stub")
+    return sbx
+
+
+def _report_stdout():
+    import json
+
+    return "BROWSER_JSON:" + json.dumps({
+        "browser": "stub",
+        "steps": [{"name": "load", "status": "pass", "detail": "", "duration_ms": 1}],
+        "screenshots": [],
+    })
+
+
+def test_browser_run_retries_transport_then_succeeds() -> None:
+    import httpx
+    from types import SimpleNamespace
+
+    sbx = _stub_commands([
+        httpx.ConnectError("stream error received"),
+        SimpleNamespace(stdout=_report_stdout()),
+    ])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is True
+    assert result.transport_failed is False
+    assert result.transport_retries == 1
+    assert sbx.commands.run.call_count == 2
+
+
+def test_browser_run_flags_transport_after_second_failure() -> None:
+    import httpx
+
+    sbx = _stub_commands([httpx.ConnectError("a"), httpx.ConnectError("b")])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is False
+    assert result.transport_failed is True
+    assert result.transport_retries == 1
+    assert "ConnectError" in result.error
+    assert sbx.commands.run.call_count == 2
+
+
+def test_browser_run_does_not_retry_app_failures() -> None:
+    sbx = _stub_commands([ValueError("bad invocation")])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is False
+    assert result.transport_failed is False
+    assert result.transport_retries == 0
+    assert sbx.commands.run.call_count == 1
+
+
+def test_browser_run_mixed_errors_follow_last_signal() -> None:
+    import httpx
+
+    sbx = _stub_commands([httpx.ConnectError("a"), ValueError("b")])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is False
+    assert result.transport_failed is False
+    assert result.transport_retries == 1
+    assert sbx.commands.run.call_count == 2
+
+
+def test_browser_run_without_report_is_measured_not_transport() -> None:
+    import httpx
+    from types import SimpleNamespace
+
+    sbx = _stub_commands([
+        httpx.ConnectError("a"),
+        SimpleNamespace(stdout="traceback, no json line"),
+    ])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is False
+    assert result.transport_failed is False
+    assert result.transport_retries == 1
+
+
+def test_verdict_inconclusive_on_transport() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[_check("browser_loads_app", CheckStatus.UNAVAILABLE)],
+        transport_failed=True, transport_retries=1,
+    )
+    assert compute_verdict(e2b, clean) == (
+        VerificationStatus.INCONCLUSIVE, "transport")
+
+
+def test_verdict_required_failure_beats_transport() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[
+            _check("browser_creates_order", CheckStatus.FAIL),
+            _check("browser_loads_app", CheckStatus.UNAVAILABLE),
+        ],
+        transport_failed=True, transport_retries=1,
+    )
+    assert compute_verdict(e2b, clean) == (VerificationStatus.FAILED, "runtime")
+
+
+def test_verdict_inconclusive_beats_audit() -> None:
+    blocking = _audit(
+        verdict=AuditVerdict.FAIL, findings=[_finding("critical")])
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[_check("browser_loads_app", CheckStatus.UNAVAILABLE)],
+        transport_failed=True, transport_retries=1,
+    )
+    assert compute_verdict(e2b, blocking) == (
+        VerificationStatus.INCONCLUSIVE, "transport")
+
+
+def test_verdict_unavailable_without_transport_stays_failed() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[_check("browser_loads_app", CheckStatus.UNAVAILABLE)],
+    )
+    assert compute_verdict(e2b, clean) == (VerificationStatus.FAILED, "runtime")
+
+
+def _frontend(path: str) -> str:
+    return (REPO_ROOT / "frontend" / "src" / path).read_text()
+
+
+def test_inconclusive_ui_contract() -> None:
+    """Static contract: the INCONCLUSIVE verdict renders neutrally with a
+    re-run pointer, and unmeasured checks never render red. (The
+    frontend has no test runner; this locks the copy and tones.)"""
+    results = _frontend("components/VerificationResults.tsx")
+    assert 'INCONCLUSIVE: { title: "Inconclusive", tone: "text-stone-600" }' in results
+    assert 'result.status === "INCONCLUSIVE"' in results
+    assert "re-run verification" in results
+    assert "not proven broken" in results
+    # Unmeasured checks fall through to the neutral glyph/tone: no
+    # special-case may paint them red.
+    assert 'status === "unavailable"' not in results
+    assert 'return "○";' in results
+    assert 'return "text-stone-500";' in results
+
+    api = _frontend("services/api.ts")
+    assert '"INCONCLUSIVE"' in api
+    assert "transport_failed: boolean" in api
+    assert "transport_retries: number" in api
+
+    for path, anchor in (
+        ("components/WorkflowProgress.tsx", "const TERMINAL = ["),
+        ("components/InterviewFlow.tsx", "const TERMINAL_BUILD_STATES = ["),
+    ):
+        source = _frontend(path)
+        line = next(
+            line for line in source.splitlines() if anchor in line)
+        assert '"INCONCLUSIVE"' in line, path

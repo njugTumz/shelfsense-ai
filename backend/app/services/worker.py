@@ -222,7 +222,7 @@ def run_build_job(job: JobRecord, db_path=None) -> JobRecord:
         if fresh is not None and fresh.status not in (
                 MissionStatus.APPROVED, MissionStatus.VERIFIED,
                 MissionStatus.VERIFIED_WITH_WARNINGS, MissionStatus.FAILED,
-                MissionStatus.AUDIT_LIMITED):
+                MissionStatus.AUDIT_LIMITED, MissionStatus.INCONCLUSIVE):
             _restore_approved(
                 fresh, f"Build failed: {exc}"[:2000], db_path)
         logger.warning("job_done job=%s status=failed class=%s",

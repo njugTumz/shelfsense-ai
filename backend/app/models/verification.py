@@ -74,6 +74,12 @@ class BrowserTestResult(BaseModel):
     screenshots: list[BrowserScreenshot] = Field(default_factory=list)
     error: str = ""
     latency_s: float = 0.0
+    #: The run was cut short by sandbox transport (ConnectError, stream
+    #: errors), not by an executed assertion. Distinct from available:
+    #: a script that ran and found nothing is measured, not inconclusive.
+    transport_failed: bool = False
+    #: Automatic transport retries consumed by this run (0 or 1).
+    transport_retries: int = 0
 
 
 class E2BVerification(BaseModel):
@@ -87,6 +93,11 @@ class E2BVerification(BaseModel):
     error: str = ""
     latency_s: float = 0.0
     browser: BrowserTestResult | None = None
+    #: Sandbox transport (not the app) ended the run early. Drives the
+    #: INCONCLUSIVE verdict; never set by executed assertion failures.
+    transport_failed: bool = False
+    #: Automatic transport retries consumed across this run.
+    transport_retries: int = 0
 
 
 class AuditVerdict(str, Enum):
@@ -140,10 +151,12 @@ class VerificationStatus(str, Enum):
     VERIFIED_WITH_WARNINGS = "VERIFIED_WITH_WARNINGS"
     FAILED = "FAILED"
     AUDIT_LIMITED = "AUDIT_LIMITED"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 VerdictReason = Literal[
-    "clean", "warnings", "runtime", "audit", "audit_unavailable", "e2b_unavailable"
+    "clean", "warnings", "runtime", "audit", "audit_unavailable", "e2b_unavailable",
+    "transport",
 ]
 
 BLOCKING_SEVERITIES = frozenset({FindingSeverity.CRITICAL, FindingSeverity.HIGH})
@@ -167,6 +180,9 @@ def compute_verdict(
     - FAILED: a required check failed, a blocking (critical/high) audit
       finding exists, or E2B was unavailable. Lack of coverage evidence
       alone never yields FAILED.
+    - INCONCLUSIVE: sandbox transport (not the app) ended the run early
+      after the automatic retry. Executed required failures still win:
+      observed app breakage is FAILED even when transport also failed.
     - AUDIT_LIMITED: the app works and deterministic checks pass, but the
       independent AI audit could not complete. Never used for Glimmer.
     - VERIFIED_WITH_WARNINGS: core checks pass with non-blocking
@@ -177,6 +193,10 @@ def compute_verdict(
     """
     if not e2b.available:
         return VerificationStatus.FAILED, "e2b_unavailable"
+    if any(c.required and c.status == CheckStatus.FAIL for c in e2b.checks):
+        return VerificationStatus.FAILED, "runtime"
+    if e2b.transport_failed:
+        return VerificationStatus.INCONCLUSIVE, "transport"
     if not e2b.passed:
         return VerificationStatus.FAILED, "runtime"
     if not audit.available or not audit.completed:

@@ -14,7 +14,7 @@ export interface ProgressPhase {
   steps: ProgressStep[];
 }
 
-const TERMINAL = ["VERIFIED", "VERIFIED_WITH_WARNINGS", "FAILED", "AUDIT_LIMITED"];
+const TERMINAL = ["VERIFIED", "VERIFIED_WITH_WARNINGS", "FAILED", "AUDIT_LIMITED", "INCONCLUSIVE"];
 const PAST_INTERVIEW = ["REQUIREMENTS_READY", "APPROVED", "BUILDING", "RUNNING", "AUDITING", ...TERMINAL];
 const E2B_ORDER = ["e2b_sandbox", "e2b_install", "e2b_build", "e2b_preview", "browser_tests"];
 const E2B_CHECK: Record<string, string> = {

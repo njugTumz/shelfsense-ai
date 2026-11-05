@@ -38,6 +38,7 @@ TERMINAL_VERIFICATION_STATES = frozenset({
     MissionStatus.VERIFIED_WITH_WARNINGS,
     MissionStatus.FAILED,
     MissionStatus.AUDIT_LIMITED,
+    MissionStatus.INCONCLUSIVE,
 })
 IN_PROGRESS_STATES = frozenset({
     MissionStatus.BUILDING,

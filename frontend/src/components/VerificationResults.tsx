@@ -10,6 +10,7 @@ const RESULT_COPY: Record<string, { title: string; tone: string }> = {
   VERIFIED_WITH_WARNINGS: { title: "Verified with warnings", tone: "text-amber-800" },
   FAILED: { title: "Failed", tone: "text-red-800" },
   AUDIT_LIMITED: { title: "Audit limited", tone: "text-amber-800" },
+  INCONCLUSIVE: { title: "Inconclusive", tone: "text-stone-600" },
 };
 
 function checkGlyph(status: string): string {
@@ -146,6 +147,14 @@ export default function VerificationResults({ result }: { result: VerificationRe
       <h3 className="text-lg font-semibold">
         Result: <span className={copy.tone}>{copy.title}</span>
       </h3>
+      {result.status === "INCONCLUSIVE" && (
+        <p className="mt-2 text-stone-600">
+          Verification could not complete: the E2B sandbox infrastructure failed
+          after {result.e2b.transport_retries} automatic{" "}
+          {result.e2b.transport_retries === 1 ? "retry" : "retries"}. The app was
+          not proven broken — re-run verification.
+        </p>
+      )}
 
       <h4 className="mt-4 font-semibold">E2B runtime verification</h4>
       <E2BResults e2b={result.e2b} />

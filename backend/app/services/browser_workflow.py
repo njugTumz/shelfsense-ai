@@ -990,24 +990,97 @@ def unavailable_browser_checks(required: dict[str, bool], reason: str) -> list[V
     ]
 
 
-def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
-    """Upload and run the FIELD-owned workflow script in the sandbox."""
+#: E2B SDK failures that mean the sandbox (not the app) broke contact.
+#: CommandExitException is deliberately absent: a command that ran and
+#: exited non-zero is measured evidence, never a transport failure.
+_E2B_TRANSIENT_ERROR_NAMES = (
+    "SandboxUnreachableException",
+    "SandboxNotRunningException",
+    "SandboxNotFoundException",
+    "TimeoutException",
+    "RateLimitException",
+    "ServiceBusyException",
+    "FileUploadException",
+)
+
+
+def _is_transport_error(exc: BaseException) -> bool:
+    """Whether the failure is sandbox transport rather than the app.
+
+    Type-based only: httpx transport errors plus the transient E2B SDK
+    errors above. Never message-sniffed, so app failures cannot be
+    misclassified by wording.
+    """
+    import httpx
+
+    if isinstance(exc, httpx.TransportError):
+        return True
+    try:
+        import e2b
+    except ImportError:
+        return False
+    transient = tuple(
+        getattr(e2b, name, ()) for name in _E2B_TRANSIENT_ERROR_NAMES
+    )
+    return isinstance(exc, transient)
+
+
+def _with_transport_retry(fn, delay_s: float = 10.0, sleep=time.sleep):
+    """Run fn, retrying a single time after transport errors.
+
+    Returns (value, retries_consumed, terminal_error): value is None
+    when both attempts failed, in which case terminal_error is the last
+    exception. Non-transport exceptions end the attempts immediately
+    without consuming the retry. Never raises itself, so callers keep
+    exact retry accounting on every path.
+    """
+    try:
+        return fn(), 0, None
+    except Exception as first:  # noqa: BLE001 - classified below
+        if not _is_transport_error(first):
+            return None, 0, first
+        sleep(delay_s)
+        try:
+            return fn(), 1, None
+        except Exception as second:  # noqa: BLE001 - returned, not raised
+            return None, 1, second
+
+
+def run_browser_tests(
+    sbx, base_url: str, retry_delay_s: float = 10.0,
+) -> BrowserTestResult:
+    """Upload and run the FIELD-owned workflow script in the sandbox.
+
+    A transport failure of the script invocation (ConnectError, stream
+    errors) retries once with a fresh order marker; a second transport
+    failure flags transport_failed instead of blaming the app. Retries
+    cannot contaminate: each script run launches an ephemeral browser
+    profile (empty web storage) and overwrites fixed screenshot paths.
+    """
     started = time.perf_counter()
-    marker = f"BROWSER-{int(time.time())}"
     sbx.files.write(BROWSER_ASSERT_PATH, BROWSER_ASSERT_SOURCE)
     sbx.files.write(BROWSER_SCRIPT_PATH, BROWSER_SCRIPT)
-    try:
+
+    def invoke():
+        # Fresh marker per attempt: with the backoff between attempts the
+        # timestamps differ, and even identical markers would be safe
+        # (ephemeral profiles start with empty storage).
+        marker = f"BROWSER-{int(time.time())}"
         # Generous ceiling: page ops already time out individually at 60s;
         # this only bounds a wedged runner under very slow infrastructure.
-        result = sbx.commands.run(
+        return sbx.commands.run(
             f"python3 {BROWSER_SCRIPT_PATH} {base_url} {marker}",
             timeout=600,
         )
-    except Exception as exc:  # noqa: BLE001 - SDK raises on timeout/non-zero
+
+    result, retries, terminal = _with_transport_retry(invoke, delay_s=retry_delay_s)
+    if terminal is not None:
         return BrowserTestResult(
             available=False,
-            error=f"Browser script did not complete: {type(exc).__name__}: {exc}"[:800],
+            error=f"Browser script did not complete: {type(terminal).__name__}: {terminal}"[:800],
             latency_s=round(time.perf_counter() - started, 1),
+            transport_failed=_is_transport_error(terminal),
+            transport_retries=retries,
         )
     report = None
     for line in (result.stdout or "").splitlines():
@@ -1017,10 +1090,13 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
             except ValueError:
                 report = None
     if not isinstance(report, dict) or not isinstance(report.get("steps"), list):
+        # The script ran but produced no report: measured (app-side),
+        # never transport. Any consumed retry is still recorded.
         return BrowserTestResult(
             available=False,
             error=f"No machine-readable browser report. stdout tail: {(result.stdout or '')[-500:]}",
             latency_s=round(time.perf_counter() - started, 1),
+            transport_retries=retries,
         )
     steps: list[BrowserStep] = []
     for entry in report["steps"]:
@@ -1059,4 +1135,5 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
         steps=steps,
         screenshots=screenshots,
         latency_s=round(time.perf_counter() - started, 1),
+        transport_retries=retries,
     )

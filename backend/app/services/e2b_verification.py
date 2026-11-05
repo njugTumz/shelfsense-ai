@@ -30,6 +30,8 @@ from app.models.verification import (
     summarize_e2b,
 )
 from app.services.browser_workflow import (
+    _is_transport_error,
+    _with_transport_retry,
     browser_steps_to_checks,
     determine_required_steps,
     run_browser_tests,
@@ -124,10 +126,16 @@ def verify_in_e2b(
     checks: list[VerificationCheck] = []
     sbx = None
     preview_url = ""
+    transport_retries = 0
     try:
         emit("e2b_sandbox", "Preparing the E2B sandbox…")
         t0 = time.perf_counter()
-        sbx = Sandbox.create(timeout=SANDBOX_TIMEOUT_S, api_key=settings.e2b_api_key)
+        sbx, created_retries, create_error = _with_transport_retry(
+            lambda: Sandbox.create(timeout=SANDBOX_TIMEOUT_S, api_key=settings.e2b_api_key)
+        )
+        transport_retries += created_retries
+        if create_error is not None:
+            raise create_error
         checks.append(
             _check(
                 "sandbox_create",
@@ -170,7 +178,12 @@ def verify_in_e2b(
 
         t0 = time.perf_counter()
         for path, data in files.items():
-            sbx.files.write(path, data)
+            _, uploaded_retries, upload_error = _with_transport_retry(
+                lambda p=path, d=data: sbx.files.write(p, d)
+            )
+            transport_retries += uploaded_retries
+            if upload_error is not None:
+                raise upload_error
         checks.append(
             _check(
                 "files_uploaded",
@@ -345,31 +358,60 @@ def verify_in_e2b(
             else:
                 checks.extend(browser_steps_to_checks(browser_result, required_steps))
 
+        browser_failed = bool(browser_result is not None and browser_result.transport_failed)
+        transport_retries += (
+            browser_result.transport_retries if browser_result is not None else 0
+        )
         passed = summarize_e2b(checks)
+        if browser_failed and browser_result is not None:
+            error = (
+                f"E2B transport failed after {browser_result.transport_retries + 1} "
+                f"attempt(s): {browser_result.error}"
+            )
+        else:
+            error = "" if passed else "One or more required checks failed."
         return _done(
             checks,
             preview_url,
             sbx.sandbox_id,
             started,
-            "" if passed else "One or more required checks failed.",
+            error,
             browser=browser_result,
+            transport_failed=browser_failed,
+            transport_retries=transport_retries,
         )
     except Exception as exc:  # noqa: BLE001 - record the real failure, then kill
-        checks.append(
-            _check(
-                "sandbox_exception",
-                CheckCategory.RUNTIME,
-                False,
-                f"{type(exc).__name__}: {exc}",
-                0.0,
+        if _is_transport_error(exc):
+            checks.append(
+                VerificationCheck(
+                    name="sandbox_exception",
+                    category=CheckCategory.RUNTIME,
+                    status=CheckStatus.UNAVAILABLE,
+                    required=True,
+                    detail=f"E2B transport failed: {type(exc).__name__}: {exc}"[:800],
+                )
             )
-        )
+        else:
+            checks.append(
+                _check(
+                    "sandbox_exception",
+                    CheckCategory.RUNTIME,
+                    False,
+                    f"{type(exc).__name__}: {exc}",
+                    0.0,
+                )
+            )
         sandbox_id = ""
         try:
             sandbox_id = sbx.sandbox_id if sbx is not None else ""
         except Exception:  # noqa: BLE001, S110
             pass
-        return _done(checks, preview_url, sandbox_id, started, f"E2B run failed: {type(exc).__name__}: {exc}")
+        return _done(
+            checks, preview_url, sandbox_id, started,
+            f"E2B run failed: {type(exc).__name__}: {exc}",
+            transport_failed=_is_transport_error(exc),
+            transport_retries=transport_retries,
+        )
     finally:
         if sbx is not None:
             try:
@@ -385,8 +427,12 @@ def _done(
     started: float,
     error: str,
     browser: BrowserTestResult | None = None,
+    transport_failed: bool = False,
+    transport_retries: int = 0,
 ) -> E2BVerification:
     passed = summarize_e2b(checks)
+    if transport_failed:
+        passed = False
     return E2BVerification(
         available=True,
         passed=passed,
@@ -396,4 +442,6 @@ def _done(
         error="" if passed else error,
         latency_s=round(time.perf_counter() - started, 1),
         browser=browser,
+        transport_failed=transport_failed,
+        transport_retries=transport_retries,
     )

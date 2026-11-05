@@ -45,6 +45,8 @@ export interface E2BVerification {
   error: string;
   latency_s: number;
   browser: BrowserTestResult | null;
+  transport_failed: boolean;
+  transport_retries: number;
 }
 
 export interface AuditFinding {
@@ -133,7 +135,7 @@ export interface RepairRecord {
 }
 
 export interface VerificationResult {
-  status: "VERIFIED" | "VERIFIED_WITH_WARNINGS" | "FAILED" | "AUDIT_LIMITED";
+  status: "VERIFIED" | "VERIFIED_WITH_WARNINGS" | "FAILED" | "AUDIT_LIMITED" | "INCONCLUSIVE";
   reason: string;
   e2b: E2BVerification;
   audit: AuditResult;
