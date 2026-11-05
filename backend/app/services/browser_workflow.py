@@ -37,6 +37,11 @@ from app.models.verification import (
 BROWSER_SCRIPT_PATH = "/tmp/browser_workflow.check.py"
 BROWSER_ASSERT_PATH = "/tmp/browser_assert.py"
 SCREENSHOT_JPG_QUALITY = 60
+#: Ceiling for one browser-script invocation. The walker alone measured
+#: 341s on the c46d retry (577s browser total); 900s keeps headroom while
+#: staying inside the 1200s sandbox cap. Sandbox cap and all other
+#: timeouts are unchanged.
+BROWSER_SCRIPT_TIMEOUT_S = 900
 
 CREATE_KEYWORDS = ("create", "add", "new order", "entry", "submit", "form")
 ADVANCE_KEYWORDS = ("status", "transition", "preparing", "ready", "move", "advance", "update")
@@ -265,9 +270,10 @@ def main():
     steps = []
     shots = []
 
-    def rec(name, status, detail="", ms=0, chain=None):
+    def rec(name, status, detail="", ms=0, chain=None, hops=None):
         steps.append({"name": name, "status": status, "detail": detail[:800],
-                      "duration_ms": int(ms), "chain": list(chain or [])})
+                      "duration_ms": int(ms), "chain": list(chain or []),
+                      "hop_durations_ms": [int(h) for h in (hops or [])]})
 
     def shot(page, name):
         try:
@@ -654,8 +660,11 @@ def main():
             if identifier is None:
                 rec("walk", "blocked", "no order identifier available", (timed() - t0) * 1000)
             else:
-                fresh_load()
+                hop_marks = []
+                load_t0 = timed()
+                walk_via = fresh_load()
                 page.locator("h1").first.wait_for(state="visible")
+                load_ms = (timed() - load_t0) * 1000
 
                 def walk_status(item):
                     sel = item.locator("select").first
@@ -695,6 +704,17 @@ def main():
                     if start:
                         chain.append(start)
                     outcome = None
+
+                    def hop_diag():
+                        if not hop_marks:
+                            return ""
+                        segs = "; ".join(
+                            f"{label} {ms / 1000:.1f}s" for label, ms in hop_marks)
+                        return f" (hops: {segs})"
+
+                    def hop_ms():
+                        return [ms for _, ms in hop_marks]
+
                     for _hop in range(8):
                         candidates = order_items(page, identifier).all()
                         item = first_with_select(candidates)
@@ -722,9 +742,13 @@ def main():
                             if nxt in chain:
                                 outcome = f"cycle detected at {nxt}"
                                 break
+                            hop_t0 = timed()
                             sel.select_option(value=nxt)
                             page.wait_for_timeout(400)
                             result, now = verify_hop(nxt)
+                            hop_marks.append((
+                                f"{chain[-1] if chain else '?'}->{nxt}",
+                                (timed() - hop_t0) * 1000))
                             if result == "ok":
                                 chain.append(nxt)
                             elif result == "gone":
@@ -734,8 +758,9 @@ def main():
                             else:
                                 rec("walk", "fail",
                                     f"hop to {nxt} not shown (at {now}); "
-                                    f"walked {' -> '.join(chain)}",
-                                    (timed() - t0) * 1000, chain=chain)
+                                    f"walked {' -> '.join(chain)}" + hop_diag(),
+                                    (timed() - t0) * 1000, chain=chain,
+                                    hops=hop_ms())
                                 break
                         else:
                             btn = item.get_by_role("button", name=ADVANCE_BUTTON).first
@@ -775,9 +800,13 @@ def main():
                             if not enabled:
                                 outcome = f"input-gated at {chain[-1] if chain else 'unknown'}"
                                 break
+                            hop_t0 = timed()
                             btn.click()
                             page.wait_for_timeout(400)
                             result, now = verify_hop(target)
+                            hop_marks.append((
+                                f"{chain[-1] if chain else '?'}->{target}",
+                                (timed() - hop_t0) * 1000))
                             if result == "ok":
                                 chain.append(target)
                             elif result == "gone":
@@ -787,17 +816,21 @@ def main():
                             else:
                                 rec("walk", "fail",
                                     f"hop to {target} not shown (at {now}); "
-                                    f"walked {' -> '.join(chain)}",
-                                    (timed() - t0) * 1000, chain=chain)
+                                    f"walked {' -> '.join(chain)}" + hop_diag(),
+                                    (timed() - t0) * 1000, chain=chain,
+                                    hops=hop_ms())
                                 break
                     else:
                         outcome = "hop cap reached"
                     if outcome is not None:
                         walked = " -> ".join(chain) if chain else "(no hops)"
                         detail = f"walked {walked} [{outcome}]"
+                        detail += f" (loaded via {walk_via} in {load_ms / 1000:.1f}s)"
+                        detail += hop_diag()
                         if synthetic:
                             detail += f" (synthetic input filled at: {', '.join(synthetic)})"
-                        rec("walk", "pass", detail, (timed() - t0) * 1000, chain=chain)
+                        rec("walk", "pass", detail, (timed() - t0) * 1000, chain=chain,
+                            hops=hop_ms())
         except Exception as exc:
             rec("walk", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
@@ -920,7 +953,7 @@ def browser_steps_to_checks(
         if step.status == BrowserStepStatus.PASS:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.PASS,
-                required=is_required, detail=f"Real browser: {step.detail}", latency_s=latency, chain=list(step.chain or []),
+                required=is_required, detail=f"Real browser: {step.detail}", latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
             ))
         elif step.status == BrowserStepStatus.NOT_APPLICABLE and (
             not is_required or step_name == "invalid"
@@ -931,31 +964,31 @@ def browser_steps_to_checks(
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.SKIPPED,
                 required=False, detail=f"Not executed: {step.detail}",
-                latency_s=latency, chain=list(step.chain or []),
+                latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
             ))
         elif step.status == BrowserStepStatus.NOT_APPLICABLE:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.FAIL,
                 required=True,
-                detail=f"Required workflow missing in app: {step.detail}", latency_s=latency, chain=list(step.chain or []),
+                detail=f"Required workflow missing in app: {step.detail}", latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
             ))
         elif step.status == BrowserStepStatus.BLOCKED and is_required:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.FAIL,
                 required=True, detail=f"Blocked, could not execute: {step.detail}",
-                latency_s=latency, chain=list(step.chain or []),
+                latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
             ))
         elif step.status == BrowserStepStatus.BLOCKED:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.SKIPPED,
                 required=False, detail=f"Blocked, could not execute: {step.detail}",
-                latency_s=latency, chain=list(step.chain or []),
+                latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
             ))
         else:
             if is_required:
                 checks.append(VerificationCheck(
                     name=check_name, category=category, status=CheckStatus.FAIL,
-                    required=True, detail=f"Real browser: {step.detail}", latency_s=latency, chain=list(step.chain or []),
+                    required=True, detail=f"Real browser: {step.detail}", latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
                 ))
             else:
                 # Executed and failed, but not demanded by the acceptance
@@ -965,7 +998,7 @@ def browser_steps_to_checks(
                     name=check_name, category=category, status=CheckStatus.FAIL,
                     required=False,
                     detail=f"Real browser: {step.detail} (not required by acceptance criteria)",
-                    latency_s=latency, chain=list(step.chain or []),
+                    latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
                 ))
     return checks
 
@@ -1025,6 +1058,31 @@ def _is_transport_error(exc: BaseException) -> bool:
     return isinstance(exc, transient)
 
 
+class _ScriptBudgetTimeout(Exception):
+    """Marker: the script invocation hit its own time budget.
+
+    Deliberately outside the transport taxonomy: a run that needs more
+    than the budget would need it again, so retrying is futile (and a
+    timed-out run may still be alive server-side, making a concurrent
+    second run dangerous in a 473MB sandbox). Surfaces as INCONCLUSIVE
+    with timeout copy, never retried.
+    """
+
+
+def _is_script_budget_timeout(exc: BaseException) -> bool:
+    """Exact-base e2b TimeoutException (call-level timeout, not sandbox state).
+
+    The SDK raises base TimeoutException for deadline_exceeded on the
+    call itself; the SandboxNot*/SandboxUnreachable subclasses name
+    sandbox-state failures and keep transport handling.
+    """
+    cls = type(exc)
+    return (
+        cls.__name__ == "TimeoutException"
+        and cls.__module__.split(".")[0] == "e2b"
+    )
+
+
 def _with_transport_retry(fn, delay_s: float = 10.0, sleep=time.sleep):
     """Run fn, retrying a single time after transport errors.
 
@@ -1068,13 +1126,29 @@ def run_browser_tests(
         marker = f"BROWSER-{int(time.time())}"
         # Generous ceiling: page ops already time out individually at 60s;
         # this only bounds a wedged runner under very slow infrastructure.
-        return sbx.commands.run(
-            f"python3 {BROWSER_SCRIPT_PATH} {base_url} {marker}",
-            timeout=600,
-        )
+        try:
+            return sbx.commands.run(
+                f"python3 {BROWSER_SCRIPT_PATH} {base_url} {marker}",
+                timeout=BROWSER_SCRIPT_TIMEOUT_S,
+            )
+        except Exception as exc:
+            if _is_script_budget_timeout(exc):
+                raise _ScriptBudgetTimeout(
+                    f"verification timed out after {BROWSER_SCRIPT_TIMEOUT_S}s "
+                    f"(budget exhausted; not retried): {exc}"
+                ) from exc
+            raise
 
     result, retries, terminal = _with_transport_retry(invoke, delay_s=retry_delay_s)
     if terminal is not None:
+        if isinstance(terminal, _ScriptBudgetTimeout):
+            return BrowserTestResult(
+                available=False,
+                error=f"Browser script timed out: {terminal}"[:800],
+                latency_s=round(time.perf_counter() - started, 1),
+                transport_failed=True,
+                transport_retries=retries,
+            )
         return BrowserTestResult(
             available=False,
             error=f"Browser script did not complete: {type(terminal).__name__}: {terminal}"[:800],
@@ -1106,12 +1180,19 @@ def run_browser_tests(
                 chain = [s for s in raw_chain if isinstance(s, str)]
             else:
                 chain = []
+            raw_hops = entry.get("hop_durations_ms", [])
+            if isinstance(raw_hops, list):
+                hops = [int(h) for h in raw_hops
+                        if isinstance(h, (int, float)) and not isinstance(h, bool)]
+            else:
+                hops = []
             steps.append(BrowserStep(
                 name=str(entry.get("name", "?")),
                 status=BrowserStepStatus(str(entry.get("status", "fail"))),
                 detail=str(entry.get("detail", ""))[:800],
                 duration_ms=int(entry.get("duration_ms", 0) or 0),
                 chain=chain,
+                hop_durations_ms=hops,
             ))
         except (ValueError, TypeError, AttributeError):
             steps.append(BrowserStep(name="?", status=BrowserStepStatus.FAIL,

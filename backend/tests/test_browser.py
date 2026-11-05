@@ -940,6 +940,58 @@ def test_report_chain_defaults_empty_when_absent_or_malformed() -> None:
     assert by_name["d"].chain == ["Ready"]
 
 
+def test_walker_template_records_hop_durations() -> None:
+    compile(BROWSER_SCRIPT, "browser_workflow.check.py", "exec")
+    assert '"hop_durations_ms"' in BROWSER_SCRIPT
+    assert "hop_marks.append" in BROWSER_SCRIPT
+    assert "def hop_diag" in BROWSER_SCRIPT
+    assert "(hops: " in BROWSER_SCRIPT
+    assert "loaded via" in BROWSER_SCRIPT
+    assert 'hops=hop_ms()' in BROWSER_SCRIPT
+
+
+def test_report_hop_durations_parsed_tolerantly() -> None:
+    result = run_browser_tests(_stub_sandbox(_browser_json(
+        {"name": "a", "status": "pass", "detail": "", "duration_ms": 0,
+         "hop_durations_ms": [1200, 800.7]},
+        {"name": "b", "status": "pass", "detail": "", "duration_ms": 0},
+        {"name": "c", "status": "pass", "detail": "", "duration_ms": 0,
+         "hop_durations_ms": "slow"},
+        {"name": "d", "status": "pass", "detail": "", "duration_ms": 0,
+         "hop_durations_ms": [5, "x", None, True]},
+    )), "http://stub/")
+    assert result.available is True
+    by_name = {s.name: s for s in result.steps}
+    assert by_name["a"].hop_durations_ms == [1200, 800]
+    assert by_name["b"].hop_durations_ms == []
+    assert by_name["c"].hop_durations_ms == []
+    assert by_name["d"].hop_durations_ms == [5]
+
+
+def test_walk_hops_flow_to_check() -> None:
+    report = BrowserTestResult(
+        available=True, browser="firefox test",
+        steps=[
+            BrowserStep(name="load", status="pass", chain=[]),
+            BrowserStep(
+                name="walk", status="pass", detail="walked it",
+                chain=["Ready", "Served"], hop_durations_ms=[3100, 2200],
+            ),
+        ],
+    )
+    checks = {c.name: c for c in browser_steps_to_checks(report, {"walk": True})}
+    assert checks["browser_walks_full_lifecycle"].hop_durations_ms == [3100, 2200]
+    failed = {c.name: c for c in browser_steps_to_checks(BrowserTestResult(
+        available=True, browser="firefox test",
+        steps=[BrowserStep(
+            name="walk", status="fail", detail="hop not shown",
+            chain=["Ready"], hop_durations_ms=[4100],
+        )],
+    ), {"walk": True})}
+    assert failed["browser_walks_full_lifecycle"].status == CheckStatus.FAIL
+    assert failed["browser_walks_full_lifecycle"].hop_durations_ms == [4100]
+
+
 _SEAM_APP_HTML = """<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1146,9 +1198,15 @@ def test_walker_seam_template_to_coverage_in_real_browser(tmp_path, monkeypatch)
             assert by_step["walk"].chain == ["Ready", "Served", "Completed"], view
             assert "Cancelled" not in by_step["walk"].chain
             assert terminal in by_step["walk"].detail
+            assert len(by_step["walk"].hop_durations_ms) == 2, view
+            assert all(h >= 0 for h in by_step["walk"].hop_durations_ms)
+            assert "(hops: Ready->Served" in by_step["walk"].detail
+            assert "loaded via" in by_step["walk"].detail
             required = determine_required_steps(C46D_CRITERIA)
             assert required["walk"] is True
             checks = browser_steps_to_checks(result, required)
+            by_check = {c.name: c for c in checks}
+            assert len(by_check["browser_walks_full_lifecycle"].hop_durations_ms) == 2, view
             e2b = E2BVerification(
                 available=True, passed=True,
                 checks=[*_static_build_checks(), *checks])

@@ -20,6 +20,8 @@ from app.models.verification import (
     compute_verdict,
 )
 from app.services.browser_workflow import (
+    BROWSER_SCRIPT_TIMEOUT_S,
+    _is_script_budget_timeout,
     _is_transport_error,
     _with_transport_retry,
     run_browser_tests,
@@ -240,6 +242,64 @@ def test_verdict_inconclusive_beats_audit() -> None:
         transport_failed=True, transport_retries=1,
     )
     assert compute_verdict(e2b, blocking) == (
+        VerificationStatus.INCONCLUSIVE, "transport")
+
+
+def test_script_budget_is_900s_and_sandbox_cap_unchanged() -> None:
+    from app.services.e2b_verification import SANDBOX_TIMEOUT_S
+
+    assert BROWSER_SCRIPT_TIMEOUT_S == 900
+    assert SANDBOX_TIMEOUT_S == 1200
+
+
+def test_script_budget_timeout_exact_type_only() -> None:
+    e2b = pytest.importorskip("e2b")
+
+    assert _is_script_budget_timeout(e2b.TimeoutException("deadline")) is True
+    assert _is_script_budget_timeout(
+        e2b.SandboxUnreachableException("gone")) is False
+    assert _is_script_budget_timeout(
+        e2b.SandboxNotRunningException("killed")) is False
+    assert _is_script_budget_timeout(ValueError("x")) is False
+
+
+def test_script_budget_timeout_never_retries() -> None:
+    e2b = pytest.importorskip("e2b")
+
+    sbx = _stub_commands([e2b.TimeoutException("deadline_exceeded")])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is False
+    assert result.transport_failed is True
+    assert result.transport_retries == 0
+    assert sbx.commands.run.call_count == 1
+    assert "timed out after 900s" in result.error
+    assert "not retried" in result.error
+
+
+def test_sandbox_state_subclass_still_retries() -> None:
+    e2b = pytest.importorskip("e2b")
+    from types import SimpleNamespace
+
+    sbx = _stub_commands([
+        e2b.SandboxUnreachableException("proxy 502"),
+        SimpleNamespace(stdout=_report_stdout()),
+    ])
+    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    assert result.available is True
+    assert result.transport_failed is False
+    assert result.transport_retries == 1
+    assert sbx.commands.run.call_count == 2
+
+
+def test_verdict_timeout_surfaces_inconclusive() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[_check("browser_loads_app", CheckStatus.UNAVAILABLE)],
+        error="Browser script timed out: verification timed out after 900s",
+        transport_failed=True, transport_retries=0,
+    )
+    assert compute_verdict(e2b, clean) == (
         VerificationStatus.INCONCLUSIVE, "transport")
 
 

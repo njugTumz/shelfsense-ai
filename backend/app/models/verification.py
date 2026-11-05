@@ -43,6 +43,8 @@ class VerificationCheck(BaseModel):
     #: status chain here (e.g. ["Received", "Preparing", "Ready"]) so
     #: coverage reads data, never parses the detail string.
     chain: list[str] = Field(default_factory=list)
+    #: Per-hop durations in ms, in hop order (walker diagnostics).
+    hop_durations_ms: list[int] = Field(default_factory=list)
 
 
 class BrowserStepStatus(str, Enum):
@@ -58,6 +60,8 @@ class BrowserStep(BaseModel):
     detail: str = ""
     duration_ms: int = 0
     chain: list[str] = Field(default_factory=list)
+    #: Per-hop durations in ms, in hop order (walker diagnostics).
+    hop_durations_ms: list[int] = Field(default_factory=list)
 
 
 class BrowserScreenshot(BaseModel):
