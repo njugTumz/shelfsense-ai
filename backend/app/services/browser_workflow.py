@@ -1129,25 +1129,21 @@ def _with_transport_retry(fn, delay_s: float = 10.0, sleep=time.sleep):
             return None, 1, second
 
 
-def run_browser_tests(
-    sbx, base_url: str, retry_delay_s: float = 10.0,
-) -> BrowserTestResult:
+def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     """Upload and run the FIELD-owned workflow script in the sandbox.
 
-    A transport failure of the script invocation (ConnectError, stream
-    errors) retries once with a fresh order marker; a second transport
-    failure flags transport_failed instead of blaming the app. Retries
-    cannot contaminate: each script run launches an ephemeral browser
-    profile (empty web storage) and overwrites fixed screenshot paths.
+    Never retried at this level: a mid-stream transport error can leave
+    the first run alive server-side, so a retry could overlap it (OOM
+    and screenshot cross-talk in a 473MB sandbox). Transport failures
+    go straight to INCONCLUSIVE with transport_retries=0; retry lives
+    only at sandbox-create and file-upload, where nothing runs yet.
     """
     started = time.perf_counter()
     sbx.files.write(BROWSER_ASSERT_PATH, BROWSER_ASSERT_SOURCE)
     sbx.files.write(BROWSER_SCRIPT_PATH, BROWSER_SCRIPT)
 
     def invoke():
-        # Fresh marker per attempt: with the backoff between attempts the
-        # timestamps differ, and even identical markers would be safe
-        # (ephemeral profiles start with empty storage).
+        # One attempt only (see docstring): a single time-based marker.
         marker = f"BROWSER-{int(time.time())}"
         # Generous ceiling: page ops already time out individually at 60s;
         # this only bounds a wedged runner under very slow infrastructure.
@@ -1169,22 +1165,26 @@ def run_browser_tests(
                 ) from exc
             raise
 
-    result, retries, terminal = _with_transport_retry(invoke, delay_s=retry_delay_s)
-    if terminal is not None:
-        if isinstance(terminal, (_ScriptBudgetTimeout, _PollingTimeout)):
-            return BrowserTestResult(
-                available=False,
-                error=f"{terminal}"[:800],
-                latency_s=round(time.perf_counter() - started, 1),
-                transport_failed=True,
-                transport_retries=retries,
-            )
+    try:
+        result = invoke()
+    except Exception as exc:  # noqa: BLE001 - classified below, never retried
+        if isinstance(exc, (_ScriptBudgetTimeout, _PollingTimeout)):
+            error, transport = f"{exc}"[:800], True
+        elif _is_transport_error(exc):
+            error = (
+                f"Browser script did not complete: {type(exc).__name__}: {exc} "
+                "(transport error, not retried; re-run verification)"
+            )[:800]
+            transport = True
+        else:
+            error = f"Browser script did not complete: {type(exc).__name__}: {exc}"[:800]
+            transport = False
         return BrowserTestResult(
             available=False,
-            error=f"Browser script did not complete: {type(terminal).__name__}: {terminal}"[:800],
+            error=error,
             latency_s=round(time.perf_counter() - started, 1),
-            transport_failed=_is_transport_error(terminal),
-            transport_retries=retries,
+            transport_failed=transport,
+            transport_retries=0,
         )
     report = None
     for line in (result.stdout or "").splitlines():
@@ -1200,7 +1200,7 @@ def run_browser_tests(
             available=False,
             error=f"No machine-readable browser report. stdout tail: {(result.stdout or '')[-500:]}",
             latency_s=round(time.perf_counter() - started, 1),
-            transport_retries=retries,
+            transport_retries=0,
         )
     steps: list[BrowserStep] = []
     for entry in report["steps"]:
@@ -1246,5 +1246,5 @@ def run_browser_tests(
         steps=steps,
         screenshots=screenshots,
         latency_s=round(time.perf_counter() - started, 1),
-        transport_retries=retries,
+        transport_retries=0,
     )

@@ -149,65 +149,38 @@ def _report_stdout():
     })
 
 
-def test_browser_run_retries_transport_then_succeeds() -> None:
-    import httpx
-    from types import SimpleNamespace
-
-    sbx = _stub_commands([
-        httpx.ConnectError("stream error received"),
-        SimpleNamespace(stdout=_report_stdout()),
-    ])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
-    assert result.available is True
-    assert result.transport_failed is False
-    assert result.transport_retries == 1
-    assert sbx.commands.run.call_count == 2
-
-
-def test_browser_run_flags_transport_after_second_failure() -> None:
+def test_browser_run_does_not_retry_transport() -> None:
+    """A mid-stream transport error can leave the first run alive, so a
+    retry could overlap it: transport goes straight to INCONCLUSIVE."""
     import httpx
 
-    sbx = _stub_commands([httpx.ConnectError("a"), httpx.ConnectError("b")])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    sbx = _stub_commands([httpx.ConnectError("stream error received")])
+    result = run_browser_tests(sbx, "http://stub/")
     assert result.available is False
     assert result.transport_failed is True
-    assert result.transport_retries == 1
+    assert result.transport_retries == 0
     assert "ConnectError" in result.error
-    assert sbx.commands.run.call_count == 2
+    assert "not retried; re-run verification" in result.error
+    assert sbx.commands.run.call_count == 1
 
 
 def test_browser_run_does_not_retry_app_failures() -> None:
     sbx = _stub_commands([ValueError("bad invocation")])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    result = run_browser_tests(sbx, "http://stub/")
     assert result.available is False
     assert result.transport_failed is False
     assert result.transport_retries == 0
     assert sbx.commands.run.call_count == 1
 
 
-def test_browser_run_mixed_errors_follow_last_signal() -> None:
-    import httpx
-
-    sbx = _stub_commands([httpx.ConnectError("a"), ValueError("b")])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
-    assert result.available is False
-    assert result.transport_failed is False
-    assert result.transport_retries == 1
-    assert sbx.commands.run.call_count == 2
-
-
 def test_browser_run_without_report_is_measured_not_transport() -> None:
-    import httpx
     from types import SimpleNamespace
 
-    sbx = _stub_commands([
-        httpx.ConnectError("a"),
-        SimpleNamespace(stdout="traceback, no json line"),
-    ])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    sbx = _stub_commands([SimpleNamespace(stdout="traceback, no json line")])
+    result = run_browser_tests(sbx, "http://stub/")
     assert result.available is False
     assert result.transport_failed is False
-    assert result.transport_retries == 1
+    assert result.transport_retries == 0
 
 
 def test_verdict_inconclusive_on_transport() -> None:
@@ -268,7 +241,7 @@ def test_script_budget_timeout_never_retries() -> None:
     e2b = pytest.importorskip("e2b")
 
     sbx = _stub_commands([e2b.TimeoutException("deadline_exceeded")])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+    result = run_browser_tests(sbx, "http://stub/")
     assert result.available is False
     assert result.transport_failed is True
     assert result.transport_retries == 0
@@ -277,19 +250,16 @@ def test_script_budget_timeout_never_retries() -> None:
     assert "not retried" in result.error
 
 
-def test_sandbox_state_subclass_still_retries() -> None:
+def test_sandbox_state_subclass_goes_straight_to_inconclusive() -> None:
     e2b = pytest.importorskip("e2b")
-    from types import SimpleNamespace
 
-    sbx = _stub_commands([
-        e2b.SandboxUnreachableException("proxy 502"),
-        SimpleNamespace(stdout=_report_stdout()),
-    ])
-    result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
-    assert result.available is True
-    assert result.transport_failed is False
-    assert result.transport_retries == 1
-    assert sbx.commands.run.call_count == 2
+    sbx = _stub_commands([e2b.SandboxUnreachableException("proxy 502")])
+    result = run_browser_tests(sbx, "http://stub/")
+    assert result.available is False
+    assert result.transport_failed is True
+    assert result.transport_retries == 0
+    assert "not retried; re-run verification" in result.error
+    assert sbx.commands.run.call_count == 1
 
 
 def test_httpx_timeouts_are_transport_and_polling() -> None:
@@ -323,7 +293,7 @@ def test_polling_timeout_never_retries() -> None:
         httpx.PoolTimeout,
     ):
         sbx = _stub_commands([cls("poll timed out")])
-        result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+        result = run_browser_tests(sbx, "http://stub/")
         assert result.available is False
         assert result.transport_failed is True
         assert result.transport_retries == 0
