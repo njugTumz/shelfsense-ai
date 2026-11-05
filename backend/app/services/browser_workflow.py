@@ -1025,11 +1025,17 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     steps: list[BrowserStep] = []
     for entry in report["steps"]:
         try:
+            raw_chain = entry.get("chain", [])
+            if isinstance(raw_chain, list):
+                chain = [s for s in raw_chain if isinstance(s, str)]
+            else:
+                chain = []
             steps.append(BrowserStep(
                 name=str(entry.get("name", "?")),
                 status=BrowserStepStatus(str(entry.get("status", "fail"))),
                 detail=str(entry.get("detail", ""))[:800],
                 duration_ms=int(entry.get("duration_ms", 0) or 0),
+                chain=chain,
             ))
         except (ValueError, TypeError, AttributeError):
             steps.append(BrowserStep(name="?", status=BrowserStepStatus.FAIL,

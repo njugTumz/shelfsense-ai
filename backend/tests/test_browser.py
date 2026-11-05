@@ -19,6 +19,7 @@ from app.services.browser_workflow import (
     BROWSER_SCRIPT,
     browser_steps_to_checks,
     determine_required_steps,
+    run_browser_tests,
     unavailable_browser_checks,
 )
 
@@ -884,3 +885,274 @@ def test_walker_helpers_resolve_fixture_controls_in_real_browser() -> None:
             assert helpers["first_with_advance_button"](terminal) is None
         finally:
             browser.close()
+
+
+# --- Chain plumbing: report JSON -> BrowserStep ---
+
+
+def _stub_sandbox(stdout: str):
+    """Sandbox stub: commands.run replays stdout, screenshot reads fail."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    sbx = MagicMock()
+    sbx.commands.run.return_value = SimpleNamespace(stdout=stdout)
+    sbx.files.read.side_effect = FileNotFoundError("no screenshots on stub")
+    return sbx
+
+
+def _browser_json(*steps: dict) -> str:
+    import json
+
+    return "BROWSER_JSON:" + json.dumps(
+        {"browser": "stub", "steps": list(steps), "screenshots": []})
+
+
+def test_report_chain_survives_parsing() -> None:
+    """Regression (c46d retry): the walker emitted its chain but parsing
+    dropped it, so Served stayed 'beyond traversed evidence'."""
+    result = run_browser_tests(_stub_sandbox(_browser_json(
+        {"name": "walk", "status": "pass",
+         "detail": "walked Ready -> Served -> Completed [terminal at Completed]",
+         "duration_ms": 12, "chain": ["Ready", "Served", "Completed"]},
+    )), "http://stub/")
+    assert result.available is True
+    (step,) = result.steps
+    assert step.chain == ["Ready", "Served", "Completed"]
+
+
+def test_report_chain_defaults_empty_when_absent_or_malformed() -> None:
+    result = run_browser_tests(_stub_sandbox(_browser_json(
+        {"name": "a", "status": "pass", "detail": "", "duration_ms": 0},
+        {"name": "b", "status": "pass", "detail": "", "duration_ms": 0, "chain": "Ready"},
+        {"name": "c", "status": "pass", "detail": "", "duration_ms": 0, "chain": {"s": 1}},
+        {"name": "d", "status": "pass", "detail": "", "duration_ms": 0,
+         "chain": ["Ready", 5, None]},
+        "not-a-dict",
+    )), "http://stub/")
+    assert result.available is True
+    by_name = {s.name: s for s in result.steps}
+    assert by_name["a"].chain == []
+    assert by_name["b"].chain == []
+    assert by_name["c"].chain == []
+    # Non-string items are dropped; genuine entries are kept (dropping
+    # claims less, never more).
+    assert by_name["d"].chain == ["Ready"]
+
+
+_SEAM_APP_HTML = """<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seam fixture</title>
+<style>
+body{font-family:sans-serif;margin:0 auto;max-width:44rem;padding:1rem}
+ul{list-style:none;padding:0}
+li{border:1px solid #ccc;border-radius:.5rem;padding:.75rem;margin:.5rem 0;overflow-wrap:anywhere}
+*{box-sizing:border-box}
+input,select,button{max-width:100%}
+</style></head><body>
+<h1>Seam Diner</h1>
+<form id="create"><label>Items <input type="text" id="items" aria-label="Items"></label>
+<button type="submit">Create order</button></form>
+<section aria-label="Kitchen queue"><h2>Kitchen queue</h2><ul id="kitchen"></ul></section>
+<section aria-label="Central order board" id="boardsec"><h2>Central order board</h2>
+<ul id="board"></ul></section>
+<script>
+const FLOW = ["Received", "Preparing", "Ready", "Served", "Completed"];
+const ALL = [...FLOW, "Cancelled"];
+const NEXT = {Received: "Preparing", Preparing: "Ready", Ready: "Served", Served: "Completed"};
+const canMove = (from, to) => NEXT[from] === to;
+let orders = [];
+try { orders = JSON.parse(localStorage.getItem("seam-orders") || "[]"); } catch (e) { orders = []; }
+const save = () => localStorage.setItem("seam-orders", JSON.stringify(orders));
+const NOBOARD = new URLSearchParams(location.search).get("view") === "buttons";
+if (NOBOARD) document.getElementById("boardsec").remove();
+document.getElementById("create").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const text = document.getElementById("items").value.trim();
+  if (!text) return;
+  orders.unshift({id: "o" + Date.now().toString(36), status: "Received",
+    items: [{description: text, quantity: 1}]});
+  save();
+  render();
+});
+function itemPara(o) {
+  const p = document.createElement("p");
+  p.textContent = o.items.map((i) => i.description).join(", ");
+  return p;
+}
+function statusPara(o) {
+  const p = document.createElement("p");
+  p.textContent = "Status: " + o.status;
+  return p;
+}
+function render() {
+  const k = document.getElementById("kitchen");
+  k.innerHTML = "";
+  for (const o of orders) {
+    const li = document.createElement("li");
+    li.append(itemPara(o), statusPara(o));
+    const nxt = NEXT[o.status] || null;
+    if (nxt) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Advance to " + nxt;
+      b.addEventListener("click", () => { o.status = nxt; save(); render(); });
+      li.append(b);
+    }
+    k.append(li);
+  }
+  if (NOBOARD) return;
+  const b = document.getElementById("board");
+  b.innerHTML = "";
+  for (const o of orders) {
+    const li = document.createElement("li");
+    li.append(itemPara(o), statusPara(o));
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", "Status for " + o.id);
+    for (const s of ALL) {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      if (s !== o.status && !canMove(o.status, s)) opt.disabled = true;
+      sel.append(opt);
+    }
+    sel.value = o.status;
+    sel.addEventListener("change", () => {
+      if (canMove(o.status, sel.value)) { o.status = sel.value; save(); render(); }
+      else { sel.value = o.status; }
+    });
+    li.append(sel);
+    b.append(li);
+  }
+}
+render();
+</script></body></html>"""
+
+
+def _serve_fixture(html: str):
+    """Serve HTML over loopback http in a background thread (keyless)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+_FIREFOX_LAUNCH = '''\
+        browser = pw.firefox.launch(firefox_user_prefs={
+            "dom.ipc.processCount": 1,
+            "browser.cache.memory.enable": False,
+        })'''
+
+
+def _run_template_locally(url: str, marker: str, tmp_path, monkeypatch) -> str:
+    """Execute the shipped BROWSER_SCRIPT against a local URL; return stdout.
+
+    Only the browser-driver line is substituted (local Chromium for E2B
+    Firefox); every workflow/walker statement runs byte-identical. The
+    exact-match assertion fails loudly if the launch block drifts.
+    """
+    import io
+    import sys
+    from contextlib import redirect_stdout
+
+    pytest.importorskip("playwright.sync_api")
+    staged = tmp_path / "seam_site"
+    staged.mkdir(exist_ok=True)
+    (staged / "browser_assert.py").write_text(BROWSER_ASSERT_SOURCE)
+    monkeypatch.syspath_prepend(str(staged))
+    assert BROWSER_SCRIPT.count(_FIREFOX_LAUNCH) == 1, (
+        "walker launch block drifted; update the seam substitution")
+    script = BROWSER_SCRIPT.replace(
+        _FIREFOX_LAUNCH, "        browser = pw.chromium.launch()")
+    monkeypatch.setattr(sys, "argv", ["check.py", url, marker])
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        exec(compile(script, "check.py", "exec"), {"__name__": "seam_template"})
+    return stdout.getvalue()
+
+
+def _static_build_checks():
+    from app.models.verification import (
+        CheckCategory,
+        VerificationCheck,
+    )
+
+    return [
+        VerificationCheck(
+            name="production_build", category=CheckCategory.BUILD,
+            status=CheckStatus.PASS, required=True),
+        VerificationCheck(
+            name="preview_serves", category=CheckCategory.RUNTIME,
+            status=CheckStatus.PASS, required=True),
+    ]
+
+
+def test_walker_seam_template_to_coverage_in_real_browser(tmp_path, monkeypatch) -> None:
+    """Full seam on a live fixture app: the actual template walks a real
+    lifecycle (select view, then buttons-only view); each produced report
+    goes through the real parser with the sandbox stubbed; the mapped
+    checks then drive coverage. Ready->Served must be SUPPORTED from the
+    walked chain in both views. Skips cleanly without Chromium."""
+    import contextlib
+    import time
+
+    from app.models.verification import E2BVerification
+    from app.services.coverage import evaluate_acceptance_criteria
+
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        try:
+            probe = pw.chromium.launch()
+            probe.close()
+        except Exception as exc:
+            pytest.skip(f"chromium not available: {exc}")
+
+    serve = contextlib.contextmanager(_serve_fixture)
+    with serve(_SEAM_APP_HTML) as base:
+        for view, terminal in (
+            ("", "terminal at Completed"),
+            ("?view=buttons", "terminal: no advancable control"),
+        ):
+            marker = f"SEAM-{int(time.time())}"
+            stdout = _run_template_locally(base + view, marker, tmp_path, monkeypatch)
+            result = run_browser_tests(_stub_sandbox(stdout), base + view)
+            assert result.available is True, result.error
+            by_step = {s.name: s for s in result.steps}
+            assert by_step["walk"].status == BrowserStepStatus.PASS, by_step["walk"].detail
+            assert by_step["walk"].chain == ["Ready", "Served", "Completed"], view
+            assert "Cancelled" not in by_step["walk"].chain
+            assert terminal in by_step["walk"].detail
+            required = determine_required_steps(C46D_CRITERIA)
+            assert required["walk"] is True
+            checks = browser_steps_to_checks(result, required)
+            e2b = E2BVerification(
+                available=True, passed=True,
+                checks=[*_static_build_checks(), *checks])
+            mappings = evaluate_acceptance_criteria(
+                _acceptance_spec(C46D_CRITERIA), e2b)
+            assert [m.status.value for m in mappings] == (
+                ["supported"] * 4 + ["partial"] * 5), view
