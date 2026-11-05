@@ -7,18 +7,21 @@ reports per-step JSON. The backend maps steps to verification checks:
 required-by-spec workflows that are missing or broken FAIL; workflows
 the spec never asks for SKIP (never pass).
 
-Workflow ``restaurant``: load -> create -> advance x2 -> invalid ->
-reload/persist -> responsive -> console. The console and responsive steps
-are quality signals: they report honestly but never gate the verdict, so
-older applications keep their behavior on re-verification. Other
-workflows can be added as new scripts; the report/check mapping stays
-shared.
+Workflow ``restaurant``: load -> create -> advance x2 -> storage ->
+invalid -> reload/persist -> responsive -> console. The storage step
+dumps browser web storage right after the advance and asserts the
+stored order holds the reached status, independent of DOM selectors.
+The console and responsive steps are quality signals: they report
+honestly but never gate the verdict, so older applications keep their
+behavior on re-verification. Other workflows can be added as new
+scripts; the report/check mapping stays shared.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 
 from app.models.verification import (
@@ -44,6 +47,7 @@ STEP_CHECK_NAMES = {
     "load": "browser_loads_app",
     "create": "browser_creates_order",
     "advance": "browser_advances_status",
+    "storage": "browser_storage_holds_status",
     "invalid": "browser_rejects_invalid",
     "persist": "browser_persists_after_reload",
     "console": "browser_console_clean",
@@ -58,6 +62,7 @@ The button-branch checks must accept any contract-compliant status rendering
 letting control wording fake status evidence: a placebo "Advance to X"
 button that changes nothing must still fail.
 """
+import json
 import re
 
 
@@ -93,6 +98,88 @@ def button_moved_past(button_names_after, expected):
         if parse_button_target(name) == expected:
             return False
     return True
+
+
+def order_items(page, marker):
+    """List items for exactly one order, across every rendered view.
+
+    Matches ``li`` elements containing a child whose whole text is
+    ``marker``. Plain substring matching also matches suffixed sibling
+    orders (MARKER-2 contains MARKER) and lets DOM order pick the wrong
+    one; a lookahead cannot fix it because Playwright joins element
+    texts without separators when testing ``has_text``.
+    """
+    return page.locator("li", has=page.get_by_text(marker, exact=True))
+
+
+def first_with_select(candidates):
+    """First candidate containing a <select> control; None when absent.
+
+    Multi-view apps render one order in several lists (queue + board) and
+    DOM order decides which rendering `.first` returns, so select-based
+    steps must pick the rendering that actually has the control instead
+    of assuming it. Accepts any sequence of locator-likes.
+    """
+    for candidate in candidates or []:
+        try:
+            if candidate.locator("select").count() > 0:
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def skip_option_state(options, skip_value):
+    """Expressibility of an illegal-skip attempt: absent|disabled|selectable.
+
+    ``options`` is a list of (value_or_text, disabled) for the fresh
+    control. 'absent'/'disabled' mean the UI never offers the invalid
+    path (correct restrictive design); only 'selectable' attempts the
+    skip so the app's rejection gate gets exercised.
+    """
+    seen = False
+    for key, disabled in options or []:
+        if key == skip_value:
+            if not disabled:
+                return "selectable"
+            seen = True
+    return "disabled" if seen else "absent"
+
+
+def stored_statuses_for(dump, identifier):
+    """Statuses at which ``identifier`` is stored in a web-storage dump.
+
+    ``dump`` maps storage keys to raw string values. Walks every JSON
+    value, attributing each exact identifier occurrence to its nearest
+    enclosing string "status". Non-JSON values are skipped: without
+    structure a status cannot be honestly attributed. Returns the list
+    of attributed statuses (None entries for unattributed hits).
+    """
+    found = []
+    if not identifier or not isinstance(dump, dict):
+        return found
+
+    def visit(node, status):
+        if isinstance(node, dict):
+            current = node.get("status")
+            if not isinstance(current, str):
+                current = status
+            for value in node.values():
+                visit(value, current)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value, status)
+        elif isinstance(node, str) and node == identifier:
+            found.append(status)
+
+    for raw in dump.values():
+        if not isinstance(raw, str):
+            continue
+        try:
+            visit(json.loads(raw), None)
+        except Exception:
+            continue
+    return found
 '''
 
 BROWSER_SCRIPT = r'''
@@ -105,8 +192,12 @@ import time
 from browser_assert import (
     button_moved_past,
     display_text_without_buttons,
+    first_with_select,
+    order_items,
     parse_button_target,
+    skip_option_state,
     status_shown_in_display,
+    stored_statuses_for,
 )
 
 URL, MARKER = sys.argv[1], sys.argv[2]
@@ -228,7 +319,7 @@ def main():
             rec("load", "pass", f"loaded; heading: {heading}", (timed() - t0) * 1000)
         except Exception as exc:
             rec("load", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
-            for name in ("create", "advance", "invalid", "persist", "console", "responsive"):
+            for name in ("create", "advance", "storage", "invalid", "persist", "console", "responsive"):
                 rec(name, "blocked", "page did not load")
             return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
 
@@ -278,7 +369,7 @@ def main():
                         rec("advance", "fail", "first list item has no readable identifier", (timed() - t0) * 1000)
                     identifier = identifier or None
             if identifier is not None and not any(s["name"] == "advance" for s in steps):
-                item = page.locator("li", has_text=identifier).first
+                item = order_items(page, identifier).first
                 if item.count() == 0:
                     rec("advance", "fail", f"order item {identifier!r} not found", (timed() - t0) * 1000)
                 else:
@@ -314,7 +405,7 @@ def main():
                         else:
                             chain = []
                             for _ in (1, 2):
-                                item = page.locator("li", has_text=identifier).first
+                                item = order_items(page, identifier).first
                                 btn = item.get_by_role("button", name=ADVANCE_BUTTON).first
                                 if btn.count() == 0:
                                     raise AssertionError("no advance button for next transition")
@@ -324,7 +415,7 @@ def main():
                                     raise AssertionError(f"advance button does not state next status: {name!r}")
                                 btn.click()
                                 page.wait_for_timeout(400)
-                                item = page.locator("li", has_text=identifier).first
+                                item = order_items(page, identifier).first
                                 display = display_text_without_buttons(
                                     item.inner_text() or "",
                                     [t for t in item.get_by_role("button").all_inner_texts() if t],
@@ -353,6 +444,44 @@ def main():
         except Exception as exc:
             rec("advance", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
+        # --- storage: dumped web storage must hold the reached status ---
+        t0 = timed()
+        try:
+            if identifier is None:
+                rec("storage", "blocked", "no order identifier available", (timed() - t0) * 1000)
+            elif last_status == "Received":
+                rec("storage", "not_applicable", "no status transition to verify in storage",
+                    (timed() - t0) * 1000)
+            else:
+                dump = page.evaluate("""() => {
+                    const out = {};
+                    for (const area of [window.localStorage, window.sessionStorage]) {
+                        try {
+                            for (let i = 0; i < area.length; i++) {
+                                const k = area.key(i);
+                                try { out[k] = area.getItem(k); } catch (e) { out[k] = "<unreadable>"; }
+                            }
+                        } catch (e) { /* storage area unavailable */ }
+                    }
+                    return out;
+                }""")
+                if not dump:
+                    rec("storage", "not_applicable", "no web-storage entries dumped",
+                        (timed() - t0) * 1000)
+                else:
+                    found = stored_statuses_for(dump, identifier)
+                    if last_status in found:
+                        rec("storage", "pass",
+                            f"storage holds {identifier} at {last_status} ({len(dump)} keys dumped)",
+                            (timed() - t0) * 1000)
+                    else:
+                        seen = sorted({s for s in found if s is not None}) or ["identifier absent"]
+                        rec("storage", "fail",
+                            f"stored {identifier} at {', '.join(seen)}; expected {last_status}",
+                            (timed() - t0) * 1000)
+        except Exception as exc:
+            rec("storage", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
+
         # --- invalid: fresh Received item, attempt illegal skip (select apps only) ---
         t0 = timed()
         try:
@@ -361,8 +490,8 @@ def main():
             else:
                 fresh_load()
                 page.locator("h1").first.wait_for(state="visible")
-                item = page.locator("li", has_text=identifier).first
-                sel = item.locator("select").first if item.count() else None
+                item = first_with_select(order_items(page, identifier).all())
+                sel = item.locator("select").first if item is not None else None
                 if sel is None or sel.count() == 0:
                     rec("invalid", "not_applicable", "no select control; buttons only offer valid transitions",
                         (timed() - t0) * 1000)
@@ -393,20 +522,44 @@ def main():
                                 page.get_by_text(marker2).first.wait_for(state="visible")
                                 target = marker2
                         if target is not None:
-                            item = page.locator("li", has_text=target).first
-                            sel = item.locator("select").first
-                            sel.select_option(label=skip_label)
-                            page.wait_for_timeout(400)
-                            if sel.input_value() == initial_value:
-                                notice = page.get_by_role("alert").count() > 0
-                                rec("invalid", "pass",
-                                    f"skip to {skip_label} rejected, stayed {initial_label} "
-                                    f"(notice shown: {notice})",
+                            item = first_with_select(order_items(page, target).all())
+                            if item is None:
+                                rec("invalid", "not_applicable",
+                                    "fresh item has no select control in any view",
                                     (timed() - t0) * 1000)
                             else:
-                                rec("invalid", "fail",
-                                    f"illegal skip accepted: status is {sel.input_value()!r}",
-                                    (timed() - t0) * 1000)
+                                sel = item.locator("select").first
+                                fresh_opts = []
+                                for opt in sel.locator("option").all():
+                                    text = (opt.inner_text() or "").strip()
+                                    key = ((opt.get_attribute("value") or "") or text).strip()
+                                    try:
+                                        dis = bool(opt.is_disabled())
+                                    except Exception:
+                                        dis = False
+                                    fresh_opts.append((key, dis))
+                                state = skip_option_state(fresh_opts, skip_value)
+                                if state == "absent":
+                                    rec("invalid", "not_applicable",
+                                        f"skip to {skip_label} not offered; invalid path not expressible",
+                                        (timed() - t0) * 1000)
+                                elif state == "disabled":
+                                    rec("invalid", "not_applicable",
+                                        f"skip to {skip_label} disabled; UI only offers valid transitions",
+                                        (timed() - t0) * 1000)
+                                else:
+                                    sel.select_option(label=skip_label)
+                                    page.wait_for_timeout(400)
+                                    if sel.input_value() == initial_value:
+                                        notice = page.get_by_role("alert").count() > 0
+                                        rec("invalid", "pass",
+                                            f"skip to {skip_label} rejected, stayed {initial_label} "
+                                            f"(notice shown: {notice})",
+                                            (timed() - t0) * 1000)
+                                    else:
+                                        rec("invalid", "fail",
+                                            f"illegal skip accepted: status is {sel.input_value()!r}",
+                                            (timed() - t0) * 1000)
         except Exception as exc:
             rec("invalid", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
@@ -418,7 +571,7 @@ def main():
             else:
                 via = fresh_load()
                 page.locator("h1").first.wait_for(state="visible")
-                item = page.locator("li", has_text=identifier).first
+                item = order_items(page, identifier).first
                 if item.count() == 0:
                     rec("persist", "fail", f"order {identifier!r} missing after reload", (timed() - t0) * 1000)
                 else:
@@ -487,15 +640,28 @@ except Exception as exc:  # never exit without a machine-readable report
     report = {"browser": "firefox (crashed)", "steps": [
         {"name": n, "status": "fail" if n == "load" else "blocked",
          "detail": f"runner crashed: {traceback.format_exc(limit=3)[-500:]}", "duration_ms": 0}
-        for n in ("load", "create", "advance", "invalid", "persist",
+        for n in ("load", "create", "advance", "storage", "invalid", "persist",
                   "console", "responsive")], "screenshots": []}
 print("BROWSER_JSON:" + json.dumps(report))
 '''
 
 
+# A reload/refresh under direct negation ("updates without page reload")
+# describes live updates, not a persistence demand. Only these tight
+# adjacent forms are discounted before the persist keyword scan: anything
+# else ("without data loss on reload", "no orders lost on reload") keeps
+# the gate armed, since an unneeded test run is safe but a silently
+# dropped genuine requirement would weaken verification.
+NEGATED_RELOAD_REFRESH = re.compile(
+    r"\bwithout\s+(?:a\s+|the\s+|any\s+|manual\s+)?(?:page\s+)?(?:reload|refresh(?:ing)?)\b"
+    r"|\bno\s+(?:page\s+)?(?:reload|refresh)\b"
+)
+
+
 def determine_required_steps(acceptance_criteria: list[str] | None) -> dict[str, bool]:
     """Which browser steps the spec demands (pure; everything else may skip)."""
     joined = " ".join(acceptance_criteria or []).lower()
+    persist_text = NEGATED_RELOAD_REFRESH.sub(" ", joined)
 
     def mentions(keywords: tuple[str, ...]) -> bool:
         return any(kw in joined for kw in keywords)
@@ -504,8 +670,12 @@ def determine_required_steps(acceptance_criteria: list[str] | None) -> dict[str,
         "load": True,
         "create": mentions(CREATE_KEYWORDS),
         "advance": mentions(ADVANCE_KEYWORDS),
+        # Storage dump is mechanism-specific (web storage only): an app
+        # persisting via IndexedDB or a backend would fail it while
+        # working, so it reports honestly but never gates the verdict.
+        "storage": False,
         "invalid": mentions(INVALID_KEYWORDS),
-        "persist": mentions(PERSIST_KEYWORDS),
+        "persist": any(kw in persist_text for kw in PERSIST_KEYWORDS),
         # Quality signals: executed and reported, never verdict-gating, so
         # re-verifying an older application cannot flip its verdict.
         "console": False,
