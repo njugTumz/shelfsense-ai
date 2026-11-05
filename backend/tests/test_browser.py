@@ -5,6 +5,8 @@ Real browser execution is proven by the extended live tests
 (test_build_live.py, test_verify_live.py).
 """
 
+import pytest
+
 from app.models.verification import (
     BrowserStep,
     BrowserStepStatus,
@@ -456,3 +458,48 @@ def test_browser_script_dumps_storage_after_advance() -> None:
     storage_at = BROWSER_SCRIPT.index('# --- storage:')
     assert BROWSER_SCRIPT.index('# --- advance') < storage_at
     assert storage_at < BROWSER_SCRIPT.index('# --- invalid')
+
+
+_COLLISION_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Collision fixture</title></head>
+<body><h1>Urban Bites</h1>
+<section aria-label="Kitchen queue"><ul>
+<li><p>#L9P9GZ</p><p>{sib}</p><p>Status: Received</p><button>Advance to Preparing</button></li>
+</ul></section>
+<section aria-label="Central order board"><ul>
+<li><p>#L9P9GZ</p><p>{sib}</p><p>Status: Received</p><select><option>Received</option></select></li>
+<li><p>#K7Q2AB</p><p>{base}</p><p>Status: Ready</p><select><option>Ready</option></select></li>
+</ul></section>
+</body></html>"""
+
+
+def test_order_items_locator_resolves_exact_order_in_real_browser() -> None:
+    """End-to-end locator semantics against the c46d failure shape: a
+    '-2' suffixed sibling plus select/button-only duplicate renderings
+    across two views. The shipped order_items helper must resolve
+    exactly the correct li. Skips cleanly when no browser is installed."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    base = "BROWSER-1793839158"
+    sib = base + "-2"
+    html = _COLLISION_HTML.format(base=base, sib=sib)
+    order_items = _assert_helpers()["order_items"]
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch()
+        except Exception as exc:
+            pytest.skip(f"chromium not available: {exc}")
+        try:
+            page = browser.new_page()
+            page.set_content(html)
+            # Fixture validity: old substring logic genuinely collides here.
+            assert page.locator("li", has_text=base).count() == 3
+            matched = order_items(page, base)
+            assert matched.count() == 1
+            text = matched.first.inner_text()
+            assert base in text and sib not in text
+            assert matched.first.locator("select").count() == 1
+            assert order_items(page, sib).count() == 2
+        finally:
+            browser.close()
