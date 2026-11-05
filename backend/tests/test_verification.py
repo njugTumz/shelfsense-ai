@@ -118,6 +118,35 @@ def test_verdict_matrix() -> None:
     assert compute_verdict(_e2b(True), clean) == (VerificationStatus.VERIFIED, "clean")
 
 
+def test_verdict_coverage_gaps_demote_but_never_fail() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    assert compute_verdict(_e2b(True), clean, has_coverage_gaps=True) == (
+        VerificationStatus.VERIFIED_WITH_WARNINGS,
+        "warnings",
+    )
+    assert compute_verdict(_e2b(True), clean, has_coverage_gaps=False) == (
+        VerificationStatus.VERIFIED,
+        "clean",
+    )
+    # Gaps never cause failure paths, and their absence never rescues one.
+    assert compute_verdict(_e2b(False), clean, has_coverage_gaps=True) == (
+        VerificationStatus.FAILED,
+        "runtime",
+    )
+    assert compute_verdict(
+        _e2b(True), _audit(verdict=AuditVerdict.FAIL), has_coverage_gaps=False
+    ) == (VerificationStatus.FAILED, "audit")
+    assert compute_verdict(_e2b(True), _audit(available=False), has_coverage_gaps=True) == (
+        VerificationStatus.AUDIT_LIMITED,
+        "audit_unavailable",
+    )
+    assert compute_verdict(
+        _e2b(True),
+        _audit(verdict=AuditVerdict.PASS, findings=[_finding("medium")]),
+        has_coverage_gaps=False,
+    ) == (VerificationStatus.VERIFIED_WITH_WARNINGS, "warnings")
+
+
 def test_glimmer_provider_never_calls_modal() -> None:
     auditor = GlimmerAuditor()
     assert auditor.available() is False
@@ -241,7 +270,9 @@ def test_reverify_rebuilds_coverage_and_classification(monkeypatch) -> None:
         lambda: SimpleNamespace(audit=lambda ev: _audit(verdict=AuditVerdict.PASS)),
     )
     result = pipeline_module.run_mission_verification("p2")
-    assert result.status == MissionStatus.VERIFIED
+    # The mocked check "c" cannot cover a reload-persistence criterion, so
+    # the coverage gap demotes VERIFIED (gaps warn, never fail).
+    assert result.status == MissionStatus.VERIFIED_WITH_WARNINGS
     assert result.verification.coverage is not None
     arch = result.verification.coverage.architecture
     assert arch is not None

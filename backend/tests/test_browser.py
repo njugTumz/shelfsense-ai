@@ -216,6 +216,159 @@ def test_coverage_uses_browser_evidence() -> None:
     assert "browser_persists_after_reload" in mappings[BUILD_CRITERIA[3]].by_checks
 
 
+def _acceptance_spec(criteria):
+    from app.models.interview import StructuredRequirements
+
+    return StructuredRequirements.model_validate({
+        "business_context": "c", "problem_statement": "p",
+        "objectives": [], "user_roles": [{"name": "r", "description": "d"}],
+        "functional_requirements": [{"id": "FR-1", "requirement": "r"}],
+        "non_functional_requirements": [], "user_journeys": [],
+        "core_features": [], "data_entities": [],
+        "acceptance_criteria": list(criteria),
+        "assumptions": [], "unresolved_questions": [],
+    })
+
+
+def _passing_e2b(names, chains=None):
+    from app.models.verification import CheckCategory, E2BVerification, VerificationCheck
+
+    chains = chains or {}
+    return E2BVerification(
+        available=True, passed=True,
+        checks=[
+            VerificationCheck(
+                name=name, category=CheckCategory.FUNCTIONAL, status=CheckStatus.PASS,
+                chain=list(chains.get(name, ())),
+            )
+            for name in names
+        ],
+    )
+
+
+def test_criterion_statuses_fixture_matrix() -> None:
+    from app.services.coverage import criterion_statuses
+
+    assert criterion_statuses("Move from Received to Preparing") == ["Received", "Preparing"]
+    assert criterion_statuses("READY then served then completed") == ["Ready", "Served", "Completed"]
+    assert criterion_statuses("Ready, ready, READY.") == ["Ready"]
+    assert criterion_statuses("Orders already served stay put.") == ["Served"]
+    assert criterion_statuses("Mark the order as paid.") == []
+    assert criterion_statuses("Cancel the entire order.") == []
+    assert criterion_statuses("") == []
+    assert criterion_statuses(None) == []
+
+
+def test_distinguishing_supported_vs_partial_vs_unverified() -> None:
+    from app.services.coverage import evaluate_acceptance_criteria
+
+    full = _passing_e2b([
+        "production_build", "preview_serves", "browser_loads_app",
+        "browser_creates_order", "browser_advances_status",
+        "browser_persists_after_reload", "browser_rejects_invalid",
+    ])
+    supported = [
+        "Counter staff can create an order and it appears in the list.",
+        "Staff can move an order from Received to Preparing.",
+        "Staff can move an order from Preparing to Ready.",
+        "The board remains visible after page reload.",
+        "Invalid status changes are rejected with a visible message.",
+        "The application builds successfully and the preview serves.",
+    ]
+    for text in supported:
+        (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), full)
+        assert mapping.status.value == "supported", text
+    partial = [
+        "Staff can move an order from Ready to Served.",
+        "Cashier can mark a Served order as paid and it moves to Completed.",
+        "Waiter can edit an existing sent order and the updated items are visible.",
+        "Waiter can cancel an entire order after sending and the list updates counts.",
+        "Manager dashboard shows outstanding count and daily paid total and updates on change.",
+        "Kitchen lists orders in arrival order oldest first.",
+    ]
+    for text in partial:
+        (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), full)
+        assert mapping.status.value == "partial", text
+        assert mapping.by_checks, text
+    (mapping,) = evaluate_acceptance_criteria(
+        _acceptance_spec(["Staff can move an order from Received to Preparing."]),
+        _passing_e2b(["production_build"]),
+    )
+    assert mapping.status.value == "unverified"
+
+
+def test_walker_chain_covers_beyond_advance_statuses() -> None:
+    from app.services.coverage import evaluate_acceptance_criteria
+
+    text = "Staff can move an order from Ready to Served."
+    short = _passing_e2b(
+        ["browser_advances_status", "browser_walks_full_lifecycle"],
+        chains={"browser_walks_full_lifecycle": ["Received", "Preparing", "Ready"]},
+    )
+    (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), short)
+    assert mapping.status.value == "partial"
+    assert "Served" in mapping.detail
+    full = _passing_e2b(
+        ["browser_advances_status", "browser_walks_full_lifecycle"],
+        chains={"browser_walks_full_lifecycle": ["Received", "Preparing", "Ready", "Served"]},
+    )
+    (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), full)
+    assert mapping.status.value == "supported"
+
+
+C46D_CRITERIA = [
+    "Waiter selects a labeled table, adds items and submits, and a new order appears in Received with that table label",
+    "Staff can move an order from Received to Preparing and the list/board updates its status immediately",
+    "Staff can move an order from Preparing to Ready and the kitchen queue and central list both reflect Ready",
+    "Staff can move an order from Ready to Served and the order leaves the kitchen Ready queue",
+    "Cashier can mark a Served table order as paid and it moves to Completed and is removed from the outstanding/open list",
+    "Manager dashboard shows outstanding order count and daily paid total and both update immediately when a payment is marked",
+    "Waiter can edit an existing sent order to add or change an item and the updated items are visible in kitchen/central views",
+    "Waiter can cancel an item or entire order after sending and the UI shows cancelled/removed state and updates counts",
+    "Kitchen view lists only Received and Preparing orders in arrival order and updates without page reload when new orders arrive",
+]
+
+C46D_PASSED_CHECKS = [
+    "assets_resolve", "browser_advances_status", "browser_console_clean",
+    "browser_creates_order", "browser_loads_app", "browser_persists_after_reload",
+    "browser_responsive_layout", "browser_storage_holds_status", "files_uploaded",
+    "node_runtime", "npm_install", "preview_serves", "production_build", "sandbox_create",
+]
+
+
+def test_c46d_acceptance_golden_mapping() -> None:
+    """Golden regression: the c46d live run's criteria map to 3 SUPPORTED
+    / 6 PARTIAL under distinguishing-path rules (sanitized inputs: plain
+    criterion texts plus stored passed check names, no tokens or URLs)."""
+    from app.services.coverage import evaluate_acceptance_criteria
+
+    mappings = evaluate_acceptance_criteria(
+        _acceptance_spec(C46D_CRITERIA), _passing_e2b(C46D_PASSED_CHECKS))
+    assert [m.status.value for m in mappings] == [
+        "supported", "supported", "supported",
+        "partial", "partial", "partial", "partial", "partial", "partial",
+    ]
+    assert "Served" in mappings[3].detail
+    assert "'edit' path" in mappings[6].detail
+    assert "'cancel' path" in mappings[7].detail
+    assert "'arrival order' path" in mappings[8].detail
+
+
+def test_browser_step_chain_flows_to_check() -> None:
+    report = BrowserTestResult(
+        available=True, browser="firefox test",
+        steps=[
+            BrowserStep(name="load", status="pass", chain=[]),
+            BrowserStep(
+                name="advance", status="pass", detail="advanced it",
+                chain=["Received", "Preparing", "Ready"],
+            ),
+        ],
+    )
+    checks = {c.name: c for c in browser_steps_to_checks(report, {"advance": True})}
+    assert checks["browser_advances_status"].chain == ["Received", "Preparing", "Ready"]
+
+
 def _assert_helpers():
     """The exact assertion logic shipped to E2B (single source of truth)."""
     namespace: dict = {}

@@ -80,7 +80,7 @@ export interface RequirementCoverage {
 
 export interface AcceptanceMapping {
   criterion: string;
-  status: "supported" | "unverified";
+  status: "supported" | "partial" | "unverified";
   by_checks: string[];
   detail: string;
 }

@@ -131,24 +131,32 @@ def run_mission_verification(
     )
     audit = active_auditor().audit(evidence)
 
-    status, reason = compute_verdict(e2b, audit)
+    # Coverage precedes the verdict: PARTIAL/UNVERIFIED criteria demote
+    # VERIFIED to VERIFIED_WITH_WARNINGS (never to FAILED). The later
+    # coverage rebuilds in build/worker only refresh requirement traces;
+    # acceptance mappings are deterministic in (spec, e2b), so the
+    # verdict cannot drift from them.
+    coverage = None
+    if mission.spec is not None:
+        output = reconstruct_output(mission)
+        if output is not None:
+            coverage = build_coverage_report(mission.spec, output, e2b)
+    gaps = bool(coverage) and any(
+        m.status.value in ("partial", "unverified") for m in coverage.acceptance
+    )
+    status, reason = compute_verdict(e2b, audit, has_coverage_gaps=gaps)
     mission.status = MissionStatus(status.value)
     mission.verification = VerificationResult(
         status=status,
         reason=reason,
         e2b=e2b,
         audit=audit,
+        coverage=coverage,
         audit_provider_active=ACTIVE_AUDITOR_NAME,
         audit_provider_target=TARGET_AUDITOR_NAME,
         started_at=run_started,
         completed_at=utc_now_iso(),
     )
-    if mission.spec is not None:
-        output = reconstruct_output(mission)
-        if output is not None:
-            mission.verification.coverage = build_coverage_report(
-                mission.spec, output, e2b
-            )
     if status == MissionStatus.FAILED:
         if reason == "e2b_unavailable":
             mission.error = e2b.error

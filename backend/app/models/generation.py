@@ -137,6 +137,7 @@ class RequirementCoverage(BaseModel):
 
 class AcceptanceSupport(str, Enum):
     SUPPORTED = "supported"
+    PARTIAL = "partial"
     UNVERIFIED = "unverified"
 
 

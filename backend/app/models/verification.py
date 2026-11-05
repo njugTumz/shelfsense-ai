@@ -39,6 +39,10 @@ class VerificationCheck(BaseModel):
     required: bool = True
     detail: str = ""
     latency_s: float = 0.0
+    #: Structured evidence extras. Lifecycle checks record the traversed
+    #: status chain here (e.g. ["Received", "Preparing", "Ready"]) so
+    #: coverage reads data, never parses the detail string.
+    chain: list[str] = Field(default_factory=list)
 
 
 class BrowserStepStatus(str, Enum):
@@ -53,6 +57,7 @@ class BrowserStep(BaseModel):
     status: BrowserStepStatus
     detail: str = ""
     duration_ms: int = 0
+    chain: list[str] = Field(default_factory=list)
 
 
 class BrowserScreenshot(BaseModel):
@@ -152,15 +157,23 @@ def summarize_e2b(checks: list[VerificationCheck]) -> bool:
     return all(c.status == CheckStatus.PASS for c in required)
 
 
-def compute_verdict(e2b: E2BVerification, audit: AuditResult) -> tuple[VerificationStatus, VerdictReason]:
-    """Combine the two independent signals into one status.
+def compute_verdict(
+    e2b: E2BVerification,
+    audit: AuditResult,
+    has_coverage_gaps: bool = False,
+) -> tuple[VerificationStatus, VerdictReason]:
+    """Combine the two independent signals plus coverage into one status.
 
-    - FAILED: the app did not build/run/pass its workflow, a blocking
-      (critical/high) audit finding exists, or E2B was unavailable.
+    - FAILED: a required check failed, a blocking (critical/high) audit
+      finding exists, or E2B was unavailable. Lack of coverage evidence
+      alone never yields FAILED.
     - AUDIT_LIMITED: the app works and deterministic checks pass, but the
       independent AI audit could not complete. Never used for Glimmer.
-    - VERIFIED_WITH_WARNINGS: core checks pass with non-blocking findings.
-    - VERIFIED: core checks pass and the audit is clean.
+    - VERIFIED_WITH_WARNINGS: core checks pass with non-blocking
+      findings, or any acceptance criterion is PARTIAL/UNVERIFIED (the
+      criteria are named in coverage.acceptance).
+    - VERIFIED: core checks pass, the audit is clean, and every
+      acceptance criterion is SUPPORTED.
     """
     if not e2b.available:
         return VerificationStatus.FAILED, "e2b_unavailable"
@@ -171,7 +184,7 @@ def compute_verdict(e2b: E2BVerification, audit: AuditResult) -> tuple[Verificat
     blocking = [f for f in audit.findings if f.severity in BLOCKING_SEVERITIES]
     if audit.verdict == AuditVerdict.FAIL or blocking:
         return VerificationStatus.FAILED, "audit"
-    if audit.verdict == AuditVerdict.PASS_WITH_WARNINGS or audit.findings:
+    if audit.verdict == AuditVerdict.PASS_WITH_WARNINGS or audit.findings or has_coverage_gaps:
         return VerificationStatus.VERIFIED_WITH_WARNINGS, "warnings"
     return VerificationStatus.VERIFIED, "clean"
 

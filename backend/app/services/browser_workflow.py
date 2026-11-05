@@ -710,7 +710,7 @@ def browser_steps_to_checks(
         if step.status == BrowserStepStatus.PASS:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.PASS,
-                required=is_required, detail=f"Real browser: {step.detail}", latency_s=latency,
+                required=is_required, detail=f"Real browser: {step.detail}", latency_s=latency, chain=list(step.chain or []),
             ))
         elif step.status == BrowserStepStatus.NOT_APPLICABLE and (
             not is_required or step_name == "invalid"
@@ -721,31 +721,31 @@ def browser_steps_to_checks(
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.SKIPPED,
                 required=False, detail=f"Not executed: {step.detail}",
-                latency_s=latency,
+                latency_s=latency, chain=list(step.chain or []),
             ))
         elif step.status == BrowserStepStatus.NOT_APPLICABLE:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.FAIL,
                 required=True,
-                detail=f"Required workflow missing in app: {step.detail}", latency_s=latency,
+                detail=f"Required workflow missing in app: {step.detail}", latency_s=latency, chain=list(step.chain or []),
             ))
         elif step.status == BrowserStepStatus.BLOCKED and is_required:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.FAIL,
                 required=True, detail=f"Blocked, could not execute: {step.detail}",
-                latency_s=latency,
+                latency_s=latency, chain=list(step.chain or []),
             ))
         elif step.status == BrowserStepStatus.BLOCKED:
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.SKIPPED,
                 required=False, detail=f"Blocked, could not execute: {step.detail}",
-                latency_s=latency,
+                latency_s=latency, chain=list(step.chain or []),
             ))
         else:
             if is_required:
                 checks.append(VerificationCheck(
                     name=check_name, category=category, status=CheckStatus.FAIL,
-                    required=True, detail=f"Real browser: {step.detail}", latency_s=latency,
+                    required=True, detail=f"Real browser: {step.detail}", latency_s=latency, chain=list(step.chain or []),
                 ))
             else:
                 # Executed and failed, but not demanded by the acceptance
@@ -755,7 +755,7 @@ def browser_steps_to_checks(
                     name=check_name, category=category, status=CheckStatus.FAIL,
                     required=False,
                     detail=f"Real browser: {step.detail} (not required by acceptance criteria)",
-                    latency_s=latency,
+                    latency_s=latency, chain=list(step.chain or []),
                 ))
     return checks
 

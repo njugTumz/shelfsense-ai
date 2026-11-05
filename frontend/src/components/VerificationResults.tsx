@@ -15,6 +15,7 @@ const RESULT_COPY: Record<string, { title: string; tone: string }> = {
 function checkGlyph(status: string): string {
   if (status === "pass" || status === "implemented" || status === "supported") return "✓";
   if (status === "fail") return "✕";
+  if (status === "partial") return "◐";
   return "○";
 }
 
@@ -22,6 +23,7 @@ function statusTone(status: string): string {
   if (status === "pass" || status === "implemented" || status === "supported")
     return "text-moss-800";
   if (status === "fail") return "text-red-800";
+  if (status === "partial") return "text-amber-800";
   return "text-stone-500";
 }
 
