@@ -87,6 +87,14 @@ def display_text_without_buttons(item_text, button_texts):
     return display
 
 
+def item_text_without_buttons(item):
+    """Locator text with its button labels removed. Shared by walk_status
+    and verify_hop so status reads never leak control labels (JSX strips
+    inter-element newlines, gluing e.g. 'Ready' + 'Advance to ...')."""
+    buttons = [t for t in item.get_by_role("button").all_inner_texts() if t]
+    return display_text_without_buttons(item.inner_text() or "", buttons)
+
+
 def status_shown_in_display(display_text, expected):
     """Expected status appears as a whole word in non-control display text."""
     if not expected:
@@ -250,6 +258,7 @@ from browser_assert import (
     display_text_without_buttons,
     first_with_advance_button,
     first_with_select,
+    item_text_without_buttons,
     next_forward_option,
     order_items,
     parse_button_target,
@@ -670,7 +679,7 @@ def main():
                     sel = item.locator("select").first
                     if sel.count() > 0:
                         return sel.input_value() or None
-                    return read_display_status(item.inner_text() or "")
+                    return read_display_status(item_text_without_buttons(item))
 
                 def verify_hop(target):
                     found = order_items(page, identifier).all()
@@ -685,10 +694,7 @@ def main():
                     if sel.count() > 0:
                         value = sel.input_value() or None
                         return ("ok" if value == target else "wrong", value)
-                    display = display_text_without_buttons(
-                        current.inner_text() or "",
-                        [t for t in current.get_by_role("button").all_inner_texts() if t],
-                    )
+                    display = item_text_without_buttons(current)
                     if status_shown_in_display(display, target):
                         return ("ok", target)
                     return ("wrong", read_display_status(display))

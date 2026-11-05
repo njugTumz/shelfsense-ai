@@ -1214,3 +1214,60 @@ def test_walker_seam_template_to_coverage_in_real_browser(tmp_path, monkeypatch)
                 _acceptance_spec(C46D_CRITERIA), e2b)
             assert [m.status.value for m in mappings] == (
                 ["supported"] * 4 + ["partial"] * 5), view
+
+
+_LEAK_FIXTURE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Leak fixture</title></head>
+<body><h1>Leak Diner</h1>
+<ul><li id="fx">
+<p>FX-LEAK-1</p>
+<span id="fxstatus">Status: Ready</span><!--
+  JSX strips inter-element newlines, so the span and the button below
+  render glued with no space, exactly like the f30ec capture.
+--><button type="button" id="fxbtn" onclick="fxAdvance()">Advance to Completed</button>
+</li></ul>
+<script>
+function fxAdvance() {
+  document.getElementById("fxstatus").textContent = "Status: Completed";
+  document.getElementById("fxbtn").remove();
+}
+</script>
+</body></html>"""
+
+
+def test_walker_status_read_ignores_button_labels_in_real_browser() -> None:
+    """f30ec regression: JSX glues 'Ready' + 'Advance to ...' in rendered
+    text, which polluted the chain with 'ReadyAdvance'. The shared strip
+    helper must yield a clean [Ready, Completed] chain through a real
+    click. Skips cleanly when no browser is installed."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    helpers = _assert_helpers()
+    assert "item_text_without_buttons" in BROWSER_ASSERT_SOURCE
+    assert "item_text_without_buttons" in BROWSER_SCRIPT
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch()
+        except Exception as exc:
+            pytest.skip(f"chromium not available: {exc}")
+        try:
+            page = browser.new_page()
+            page.set_content(_LEAK_FIXTURE_HTML)
+            li = page.locator("#fx")
+
+            def status_of(item):
+                if item.locator("select").count() > 0:
+                    return item.locator("select").first.input_value() or None
+                return helpers["read_display_status"](
+                    helpers["item_text_without_buttons"](item))
+
+            assert helpers["read_display_status"](li.inner_text()) == "ReadyAdvance"
+            chain = [status_of(li)]
+            assert chain == ["Ready"]
+            li.get_by_role("button").click()
+            chain.append(status_of(li))
+            assert chain == ["Ready", "Completed"]
+            assert "Advance" not in "".join(chain)
+        finally:
+            browser.close()
