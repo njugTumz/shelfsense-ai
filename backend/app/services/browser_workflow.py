@@ -1083,6 +1083,25 @@ def _is_script_budget_timeout(exc: BaseException) -> bool:
     )
 
 
+class _PollingTimeout(Exception):
+    """Marker: SDK polling timed out with unknown remote state.
+
+    Deliberately outside the transport retry: the command may still be
+    running server-side, so a second concurrent run risks OOM and
+    cross-talk. Surfaces as INCONCLUSIVE with timeout copy, never
+    retried. Checked before the transport taxonomy, which would
+    otherwise claim httpx timeouts (TimeoutException subclasses
+    TransportError in httpx 0.28).
+    """
+
+
+def _is_polling_timeout(exc: BaseException) -> bool:
+    """Any httpx timeout: the poll never answered, remote state unknown."""
+    import httpx
+
+    return isinstance(exc, httpx.TimeoutException)
+
+
 def _with_transport_retry(fn, delay_s: float = 10.0, sleep=time.sleep):
     """Run fn, retrying a single time after transport errors.
 
@@ -1137,14 +1156,19 @@ def run_browser_tests(
                     f"verification timed out after {BROWSER_SCRIPT_TIMEOUT_S}s "
                     f"(budget exhausted; not retried): {exc}"
                 ) from exc
+            if _is_polling_timeout(exc):
+                raise _PollingTimeout(
+                    f"polling the sandbox timed out (status unknown; "
+                    f"not retried): {exc}"
+                ) from exc
             raise
 
     result, retries, terminal = _with_transport_retry(invoke, delay_s=retry_delay_s)
     if terminal is not None:
-        if isinstance(terminal, _ScriptBudgetTimeout):
+        if isinstance(terminal, (_ScriptBudgetTimeout, _PollingTimeout)):
             return BrowserTestResult(
                 available=False,
-                error=f"Browser script timed out: {terminal}"[:800],
+                error=f"{terminal}"[:800],
                 latency_s=round(time.perf_counter() - started, 1),
                 transport_failed=True,
                 transport_retries=retries,

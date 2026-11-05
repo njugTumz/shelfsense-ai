@@ -21,6 +21,7 @@ from app.models.verification import (
 )
 from app.services.browser_workflow import (
     BROWSER_SCRIPT_TIMEOUT_S,
+    _is_polling_timeout,
     _is_script_budget_timeout,
     _is_transport_error,
     _with_transport_retry,
@@ -289,6 +290,46 @@ def test_sandbox_state_subclass_still_retries() -> None:
     assert result.transport_failed is False
     assert result.transport_retries == 1
     assert sbx.commands.run.call_count == 2
+
+
+def test_httpx_timeouts_are_transport_and_polling() -> None:
+    """Real-class hierarchy lock (httpx 0.28): timeouts subclass BOTH
+    TransportError and TimeoutException, so the invoke site must check
+    polling-timeout BEFORE the transport taxonomy to withhold retry."""
+    import httpx
+
+    for cls in (
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+    ):
+        assert issubclass(cls, httpx.TransportError)
+        assert issubclass(cls, httpx.TimeoutException)
+        assert _is_transport_error(cls("x")) is True
+        assert _is_polling_timeout(cls("x")) is True
+    assert _is_polling_timeout(httpx.ConnectError("x")) is False
+    assert _is_polling_timeout(httpx.ReadError("x")) is False
+    assert _is_polling_timeout(ValueError("x")) is False
+
+
+def test_polling_timeout_never_retries() -> None:
+    import httpx
+
+    for cls in (
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+    ):
+        sbx = _stub_commands([cls("poll timed out")])
+        result = run_browser_tests(sbx, "http://stub/", retry_delay_s=0)
+        assert result.available is False
+        assert result.transport_failed is True
+        assert result.transport_retries == 0
+        assert sbx.commands.run.call_count == 1
+        assert "polling the sandbox timed out" in result.error
+        assert "not retried" in result.error
 
 
 def test_verdict_timeout_surfaces_inconclusive() -> None:
