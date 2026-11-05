@@ -56,6 +56,23 @@ REPAIRABLE_RUNTIME_CHECKS = frozenset({
 
 GENERATED_PREFIX = APP_ROOT + "/src/"
 FAILURE_DETAIL_BUDGET = 600
+#: tsc prints one line per error; a broken build needs more room than
+#: other checks. Duplicates collapse first so the budget carries
+#: distinct errors.
+BUILD_FAILURE_DETAIL_BUDGET = 2000
+
+
+def _dedupe_lines(text: str) -> str:
+    """Collapse blank and duplicate lines, preserving first-seen order."""
+    seen: set[str] = set()
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        kept.append(line.rstrip())
+    return "\n".join(kept)
 
 
 class RepairEligibility(BaseModel):
@@ -112,10 +129,14 @@ def repair_eligibility(mission: Mission) -> RepairEligibility:
                 eligible=False, reason="no_repairable_cause",
                 failures="No failed check points at generated app source.",
             )
-        lines = [
-            f"- [{c.category.value}] {c.name}: {(c.detail or '(no detail)')[:FAILURE_DETAIL_BUDGET]}"
-            for c in fixable
-        ]
+        lines = []
+        for c in fixable:
+            detail = c.detail or "(no detail)"
+            if c.name == "production_build":
+                detail = _dedupe_lines(detail)[:BUILD_FAILURE_DETAIL_BUDGET]
+            else:
+                detail = detail[:FAILURE_DETAIL_BUDGET]
+            lines.append(f"- [{c.category.value}] {c.name}: {detail}")
         trigger = "runtime:" + ",".join(sorted(c.name for c in fixable))
         return RepairEligibility(
             eligible=True, reason="runtime", trigger=trigger,

@@ -147,6 +147,27 @@ def test_manifest_import_allowlist() -> None:
         assert any("disallowed import" in e for e in errors), snippet
 
 
+def test_manifest_rejects_ts_suffixed_imports() -> None:
+    for snippet in (
+        'import App from "./App.tsx";',
+        'import type { T } from "../lib/types.ts";',
+        'export { a } from "./data.ts";',
+        'const m = require("./lib/rules.ts");',
+        'const m = await import("./lazy.mts");',
+        'import "./polyfill.cts";',
+        'import x from "./orders.ts?raw";',
+    ):
+        errors = validate_manifest([_file(path="src/components/Board.tsx", content=snippet)])
+        assert any("ts source extension" in e and "Board.tsx" in e for e in errors), snippet
+    for snippet in (
+        'import App from "./App";',
+        'import { x } from "../lib/orders.js";',
+        'import "./app.css";',
+        'import { useState } from "react";',
+    ):
+        assert validate_manifest([_file(content=snippet)]) == [], snippet
+
+
 def test_manifest_enforces_lib_purity() -> None:
     pure = "export function next(a) { return a; }"
     assert validate_manifest([_file("src/lib/rules.js", pure), _file()]) == []
@@ -512,6 +533,8 @@ PROMPT_ANCHORS = (
     "DESIGN CONTRACT",
     "Tailwind-first",
     "Anything else is rejected",
+    "TS5097",
+    "TS7053",
 )
 
 

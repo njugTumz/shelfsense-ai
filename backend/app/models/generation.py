@@ -198,6 +198,28 @@ def _disallowed_imports(content: str) -> list[str]:
     return bad
 
 
+_TS_SOURCE_SUFFIXES = (".ts", ".tsx", ".mts", ".cts")
+
+
+def _ts_suffixed_imports(content: str) -> list[str]:
+    """Relative import specifiers ending in a TS source extension.
+
+    The scaffold tsconfig leaves allowImportingTsExtensions off, so
+    './orders.ts' always fails the build (TS5097). Extensionless
+    relative imports are the only valid form ('.js' stays valid, but
+    only for real .js files).
+    """
+    bad: list[str] = []
+    for match in _IMPORT_SPEC.finditer(content):
+        spec = match.group(2) or match.group(4) or match.group(5) or match.group(6) or ""
+        if not spec.startswith("."):
+            continue
+        clean = spec.split("?", 1)[0].split("#", 1)[0]
+        if clean.endswith(_TS_SOURCE_SUFFIXES) and spec not in bad:
+            bad.append(spec)
+    return bad
+
+
 def _lib_purity_violation(path: str, content: str) -> str | None:
     """Rejection reason when a src/lib/* module breaks dependency purity.
 
@@ -264,6 +286,9 @@ def validate_manifest(files: list[GeneratedFile]) -> list[str]:
         for bad_import in _disallowed_imports(item.content):
             errors.append(f"disallowed import '{bad_import}' (FIELD installs only "
                           f"{sorted(ALLOWED_BARE_IMPORTS)}): {label}")
+        for suffixed in _ts_suffixed_imports(item.content):
+            errors.append(f"ts source extension in import '{suffixed}' (tsconfig forbids "
+                          f"'.ts' suffixes; import extensionless): {label}")
         if path.startswith("src/lib/"):
             violation = _lib_purity_violation(path, item.content)
             if violation:

@@ -150,6 +150,13 @@ RULES:
 - Implement ONLY what the spec requires; map every feature to its \
 requirement IDs in feature_map.
 """ + ARCHITECTURE_RULES + """
+- Never end a relative import with .ts/.tsx (the scaffold tsconfig \
+forbids TS source extensions; TS5097 breaks the build): write \
+'./orders' not './orders.ts'. A '.js' suffix is valid only for real \
+.js files.
+- Index records only with typed keys: give lookup objects an explicit \
+union key type or Record<string, ...> plus a runtime guard, never a \
+bare string index (TS7053 breaks strict builds).
 - If a requirement cannot be implemented in this constrained app, list it \
 in unimplemented with the reason instead of faking it.
 - Reply with ONLY valid DeveloperOutput JSON."""
@@ -237,6 +244,13 @@ RULES:
 - Implement ONLY what the spec requires; map every feature to its \
 requirement IDs in feature_map.
 """ + ARCHITECTURE_RULES + """
+- Never end a relative import with .ts/.tsx (the scaffold tsconfig \
+forbids TS source extensions; TS5097 breaks the build): write \
+'./orders' not './orders.ts'. A '.js' suffix is valid only for real \
+.js files.
+- Index records only with typed keys: give lookup objects an explicit \
+union key type or Record<string, ...> plus a runtime guard, never a \
+bare string index (TS7053 breaks strict builds).
 - If a requirement cannot be implemented in this constrained app, list it \
 in unimplemented with the reason instead of faking it.
 - Fix ONLY the observed failures listed below; keep all working behavior.

@@ -424,3 +424,20 @@ def test_repair_guards(db_path) -> None:
     save_mission(Mission(id="ok", status=MissionStatus.APPROVED), db_path)
     with pytest.raises(LifecycleError):
         repair_module.repair_application("ok", db_path=db_path)
+
+
+def test_build_failure_evidence_dedupes_and_extends() -> None:
+    from app.services.repair import repair_eligibility
+
+    line = "src/App.tsx(6,56): error TS5097: An import path can only end with a '.ts' extension.\n"
+    mission = _failed_mission(
+        "runtime", _e2b([_check("production_build", detail=line * 30)]), _audit())
+    decision = repair_eligibility(mission)
+    assert decision.eligible is True
+    assert decision.failures.count("TS5097") == 1
+    long_build = _failed_mission(
+        "runtime", _e2b([_check("production_build", detail="x" * 3000)]), _audit())
+    assert repair_eligibility(long_build).failures.count("x") == 2000
+    other = _failed_mission(
+        "runtime", _e2b([_check("preview_serves", detail="y" * 3000)]), _audit())
+    assert repair_eligibility(other).failures.count("y") == 600
