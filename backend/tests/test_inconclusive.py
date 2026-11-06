@@ -359,3 +359,39 @@ def test_inconclusive_ui_contract() -> None:
     start = shared.index("export const TERMINAL_STATUSES = [")
     end = shared.index("];", start)
     assert '"INCONCLUSIVE"' in shared[start:end]
+
+
+def test_verdict_script_timeout_surfaces_inconclusive() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[_check("browser_loads_app", CheckStatus.PASS),
+                _check("browser_creates_order", CheckStatus.UNAVAILABLE)],
+        script_timeout=True,
+    )
+    assert compute_verdict(e2b, clean) == (
+        VerificationStatus.INCONCLUSIVE, "script_timeout")
+
+
+def test_verdict_required_fail_wins_over_script_timeout() -> None:
+    """An executed required failure stays FAILED even when the deadline
+    also fired: observed breakage outranks unmeasured remainder."""
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False,
+        checks=[_check("browser_loads_app", CheckStatus.FAIL)],
+        script_timeout=True,
+    )
+    assert compute_verdict(e2b, clean) == (VerificationStatus.FAILED, "runtime")
+
+
+def test_verdict_transport_wins_over_script_timeout() -> None:
+    """Both flags cannot co-occur (report vs exception paths), but the
+    order is pinned: transport first."""
+    clean = _audit(verdict=AuditVerdict.PASS)
+    e2b = E2BVerification(
+        available=True, passed=False, checks=[],
+        transport_failed=True, script_timeout=True,
+    )
+    assert compute_verdict(e2b, clean) == (
+        VerificationStatus.INCONCLUSIVE, "transport")

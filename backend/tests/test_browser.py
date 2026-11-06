@@ -672,7 +672,8 @@ def test_walker_template_emits_structured_chain() -> None:
     compile(BROWSER_SCRIPT, "browser_workflow.check.py", "exec")
     assert STEP_CHECK_NAMES["walk"] == "browser_walks_full_lifecycle"
     assert '# --- walk:' in BROWSER_SCRIPT
-    assert 'rec("walk", "pass"' in BROWSER_SCRIPT
+    assert 'walk_status = "not_run" if deadline_cut_walk else "pass"' in BROWSER_SCRIPT
+    assert 'rec("walk", walk_status, detail' in BROWSER_SCRIPT
     assert 'rec("walk", "fail"' in BROWSER_SCRIPT
     assert 'rec("walk", "blocked"' in BROWSER_SCRIPT
     assert "chain=chain" in BROWSER_SCRIPT
@@ -1375,3 +1376,105 @@ def test_budget_timeout_without_progress_file_stays_empty() -> None:
     assert "steps recorded" not in result.error
     assert "timed out after 900s" in result.error
     assert "not retried" in result.error
+
+
+def test_internal_deadline_wiring_in_template() -> None:
+    """Every step section honors the internal deadline: 8 guarded trys
+    (load + 6 workflow + responsive), the console elif, the walker
+    hop-loop break, and the deadline_exceeded report flag."""
+    assert "float(sys.argv[3]) if len(sys.argv) > 3 else 780" in BROWSER_SCRIPT
+    assert BROWSER_SCRIPT.count("raise _DeadlineExceeded()") == 8
+    assert BROWSER_SCRIPT.count("except _DeadlineExceeded:") == 8
+    assert "elif console_errors:" in BROWSER_SCRIPT
+    assert "deadline_cut_walk = True" in BROWSER_SCRIPT
+    assert '"deadline_exceeded": any(' in BROWSER_SCRIPT
+    assert '"deadline_exceeded": False' in BROWSER_SCRIPT
+    assert '"deadline_exceeded": True' in BROWSER_SCRIPT
+
+
+def test_zero_deadline_returns_full_not_run_report(tmp_path, monkeypatch) -> None:
+    """Behavioral: with a 0s deadline the template attempts nothing yet
+    still returns a machine-readable report: all 9 steps not_run with
+    the deadline reason, deadline_exceeded set. Skips without Chromium."""
+    import contextlib
+    import json
+    import time
+
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        try:
+            probe = pw.chromium.launch()
+            probe.close()
+        except Exception as exc:
+            pytest.skip(f"chromium not available: {exc}")
+    serve = contextlib.contextmanager(_serve_fixture)
+    with serve(_SEAM_APP_HTML) as base:
+        import io
+        import sys
+        from contextlib import redirect_stdout
+
+        staged = tmp_path / "deadline_site"
+        staged.mkdir(exist_ok=True)
+        (staged / "browser_assert.py").write_text(BROWSER_ASSERT_SOURCE)
+        monkeypatch.syspath_prepend(str(staged))
+        script = BROWSER_SCRIPT.replace(
+            _FIREFOX_LAUNCH, "        browser = pw.chromium.launch()")
+        marker = f"DL-{int(time.time())}"
+        monkeypatch.setattr(sys, "argv", ["check.py", base, marker, "0"])
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exec(compile(script, "check.py", "exec"), {"__name__": "deadline_seam"})
+        line = next(line for line in stdout.getvalue().splitlines()
+                    if line.startswith("BROWSER_JSON:"))
+        report = json.loads(line[len("BROWSER_JSON:"):])
+    assert report["deadline_exceeded"] is True
+    # The load early-return order (console before responsive) matches the
+    # pre-existing load-failure path, not the normal section order.
+    assert [(s["name"], s["status"]) for s in report["steps"]] == [
+        (n, "not_run") for n in
+        ("load", "create", "advance", "storage", "invalid", "persist",
+         "walk", "console", "responsive")]
+    assert all("deadline exceeded" in s["detail"] for s in report["steps"])
+
+
+def test_deadline_report_sets_script_timeout_and_unavailable() -> None:
+    """A deadline-fired report stays available (it ran) but flags
+    script_timeout; not_run steps map to UNAVAILABLE with required kept."""
+    import json
+
+    steps = [
+        {"name": "load", "status": "pass", "detail": "loaded", "duration_ms": 5000},
+        {"name": "create", "status": "not_run",
+         "detail": "internal 780s deadline exceeded; step not attempted",
+         "duration_ms": 1},
+    ]
+    stdout = "BROWSER_JSON:" + json.dumps(
+        {"browser": "stub", "steps": steps, "screenshots": [],
+         "deadline_exceeded": True})
+    result = run_browser_tests(_stub_sandbox(stdout), "http://stub/")
+    assert result.available is True
+    assert result.script_timeout is True
+    assert result.transport_failed is False
+    required = {"load": True, "create": True, "advance": True,
+                "storage": False, "invalid": False, "persist": True,
+                "walk": True, "console": False, "responsive": False}
+    by_check = {c.name: c for c in browser_steps_to_checks(result, required)}
+    create = by_check["browser_creates_order"]
+    assert create.status == CheckStatus.UNAVAILABLE
+    assert create.required is True
+    assert create.detail.startswith("Not run: ")
+
+
+def test_not_run_without_flag_still_flags_timeout() -> None:
+    """Defense in depth: not_run steps imply the timeout even when the
+    report flag is absent (hand-written or older templates)."""
+    import json
+
+    stdout = "BROWSER_JSON:" + json.dumps(
+        {"browser": "stub", "steps": [
+            {"name": "load", "status": "not_run", "detail": "d", "duration_ms": 0}],
+         "screenshots": []})
+    result = run_browser_tests(_stub_sandbox(stdout), "http://stub/")
+    assert result.script_timeout is True

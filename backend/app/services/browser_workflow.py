@@ -252,7 +252,7 @@ def read_display_status(display_text):
 '''
 
 BROWSER_SCRIPT = r'''
-"""FIELD-owned restaurant workflow test. argv: url marker. Prints BROWSER_JSON line."""
+"""FIELD-owned restaurant workflow test. argv: url marker [deadline_s]. Prints BROWSER_JSON line."""
 import json
 import re
 import sys
@@ -274,6 +274,21 @@ from browser_assert import (
 )
 
 URL, MARKER = sys.argv[1], sys.argv[2]
+# Internal global deadline: stop starting new work this far into the run
+# and record the rest as not_run, so a slow run returns a full report
+# instead of dying at the 900s invocation budget with zero evidence.
+# Overridable via argv for tests; production always uses the default.
+INTERNAL_DEADLINE_S = float(sys.argv[3]) if len(sys.argv) > 3 else 780.0
+
+
+class _DeadlineExceeded(Exception):
+    """Raised to skip a step section once the internal deadline passes."""
+    pass
+
+
+def _deadline_detail():
+    return (f"internal {INTERNAL_DEADLINE_S:g}s deadline exceeded; "
+            "step not attempted")
 # Every recorded step is appended here (one JSON object per line) AND
 # echoed as a BROWSER_STEP stdout line, so a budget kill that discards
 # the final report still leaves retrievable partial evidence behind.
@@ -292,6 +307,10 @@ def main():
 
     steps = []
     shots = []
+    script_t0 = time.time()
+
+    def deadline_hit():
+        return time.time() - script_t0 > INTERNAL_DEADLINE_S
 
     def rec(name, status, detail="", ms=0, chain=None, hops=None):
         entry = {"name": name, "status": status, "detail": detail[:800],
@@ -405,16 +424,25 @@ def main():
         page.on("pageerror", lambda exc: console_errors.append(str(exc)[:300]))
         version = browser.version
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             t0 = timed()
             page.goto(URL, wait_until="load")
             page.locator("h1").first.wait_for(state="visible")
             heading = page.locator("h1").first.inner_text()[:100]
             rec("load", "pass", f"loaded; heading: {heading}", (timed() - t0) * 1000)
+        except _DeadlineExceeded:
+            rec("load", "not_run", _deadline_detail(), 0)
+            for name in ("create", "advance", "storage", "invalid", "persist", "walk", "console", "responsive"):
+                rec(name, "not_run", _deadline_detail())
+            return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots,
+                    "deadline_exceeded": True}
         except Exception as exc:
             rec("load", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
             for name in ("create", "advance", "storage", "invalid", "persist", "walk", "console", "responsive"):
                 rec(name, "blocked", "page did not load")
-            return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
+            return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots,
+                    "deadline_exceeded": any(s["status"] == "not_run" for s in steps)}
 
         identifier = None
         last_status = "Received"
@@ -422,6 +450,8 @@ def main():
         # --- create ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             form = page.locator("form").first
             scope = form if form.count() else page
             counts = fill_create_form(scope, MARKER)
@@ -444,6 +474,8 @@ def main():
                         f"{counts['number']} number, {counts['check']} check)",
                         (timed() - t0) * 1000)
                     shot(page, "created")
+        except _DeadlineExceeded:
+            rec("create", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             shot(page, "create_failed")
             rec("create", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
@@ -451,6 +483,8 @@ def main():
         # --- advance Received -> Preparing -> Ready ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             if identifier is None:
                 first_li = page.locator("li").first
                 if first_li.count() == 0:
@@ -534,12 +568,16 @@ def main():
                     shot(page, "advanced")
         except AssertionError as exc:
             rec("advance", "fail", str(exc)[:500], (timed() - t0) * 1000)
+        except _DeadlineExceeded:
+            rec("advance", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             rec("advance", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
         # --- storage: dumped web storage must hold the reached status ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             if identifier is None:
                 rec("storage", "blocked", "no order identifier available", (timed() - t0) * 1000)
             elif last_status == "Received":
@@ -572,12 +610,16 @@ def main():
                         rec("storage", "fail",
                             f"stored {identifier} at {', '.join(seen)}; expected {last_status}",
                             (timed() - t0) * 1000)
+        except _DeadlineExceeded:
+            rec("storage", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             rec("storage", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
         # --- invalid: fresh Received item, attempt illegal skip (select apps only) ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             if identifier is None:
                 rec("invalid", "blocked", "no order identifier available", (timed() - t0) * 1000)
             else:
@@ -653,12 +695,16 @@ def main():
                                         rec("invalid", "fail",
                                             f"illegal skip accepted: status is {sel.input_value()!r}",
                                             (timed() - t0) * 1000)
+        except _DeadlineExceeded:
+            rec("invalid", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             rec("invalid", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
         # --- persist: reload, identifier + last status must survive ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             if identifier is None:
                 rec("persist", "blocked", "no order identifier available", (timed() - t0) * 1000)
             else:
@@ -684,12 +730,16 @@ def main():
                         rec("persist", "fail", f"order present but {last_status} status lost after reload",
                             (timed() - t0) * 1000)
                 shot(page, "reloaded")
+        except _DeadlineExceeded:
+            rec("persist", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             rec("persist", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
         # --- walk: advance through every reachable status to terminal ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             if identifier is None:
                 rec("walk", "blocked", "no order identifier available", (timed() - t0) * 1000)
             else:
@@ -734,6 +784,7 @@ def main():
                     if start:
                         chain.append(start)
                     outcome = None
+                    deadline_cut_walk = False
 
                     def hop_diag():
                         if not hop_marks:
@@ -746,6 +797,11 @@ def main():
                         return [ms for _, ms in hop_marks]
 
                     for _hop in range(8):
+                        if deadline_hit():
+                            outcome = ("internal deadline exceeded; "
+                                       f"walked {' -> '.join(chain)}" + hop_diag())
+                            deadline_cut_walk = True
+                            break
                         candidates = order_items(page, identifier).all()
                         item = first_with_select(candidates)
                         if item is None:
@@ -859,14 +915,19 @@ def main():
                         detail += hop_diag()
                         if synthetic:
                             detail += f" (synthetic input filled at: {', '.join(synthetic)})"
-                        rec("walk", "pass", detail, (timed() - t0) * 1000, chain=chain,
+                        walk_status = "not_run" if deadline_cut_walk else "pass"
+                        rec("walk", walk_status, detail, (timed() - t0) * 1000, chain=chain,
                             hops=hop_ms())
+        except _DeadlineExceeded:
+            rec("walk", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             rec("walk", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
         # --- responsive: mobile viewport loads without horizontal overflow ---
         t0 = timed()
         try:
+            if deadline_hit():
+                raise _DeadlineExceeded()
             page.set_viewport_size({"width": 390, "height": 844})
             via = fresh_load()
             page.locator("h1").first.wait_for(state="visible")
@@ -883,12 +944,16 @@ def main():
                 rec("responsive", "pass",
                     f"390px viewport loads with no horizontal overflow ({via})",
                     (timed() - t0) * 1000)
+        except _DeadlineExceeded:
+            rec("responsive", "not_run", _deadline_detail(), (timed() - t0) * 1000)
         except Exception as exc:
             rec("responsive", "fail", f"{type(exc).__name__}: {exc}"[:500], (timed() - t0) * 1000)
 
         # --- console: no runtime errors anywhere in the run ---
         t0 = timed()
-        if console_errors:
+        if deadline_hit():
+            rec("console", "not_run", _deadline_detail(), (timed() - t0) * 1000)
+        elif console_errors:
             uniq = list(dict.fromkeys(console_errors))[:3]
             rec("console", "fail",
                 f"{len(console_errors)} console error(s): {'; '.join(uniq)}"[:500],
@@ -899,7 +964,8 @@ def main():
                 (timed() - t0) * 1000)
 
         browser.close()
-        return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots}
+        return {"browser": f"firefox {version}", "steps": steps, "screenshots": shots,
+                "deadline_exceeded": any(s["status"] == "not_run" for s in steps)}
 
 
 try:
@@ -911,7 +977,8 @@ except Exception as exc:  # never exit without a machine-readable report
         {"name": n, "status": "fail" if n == "load" else "blocked",
          "detail": f"runner crashed: {traceback.format_exc(limit=3)[-500:]}", "duration_ms": 0}
         for n in ("load", "create", "advance", "storage", "invalid", "persist", "walk",
-                  "console", "responsive")], "screenshots": []}
+                  "console", "responsive")], "screenshots": [],
+        "deadline_exceeded": False}
 print("BROWSER_JSON:" + json.dumps(report))
 '''
 
@@ -1012,6 +1079,15 @@ def browser_steps_to_checks(
             checks.append(VerificationCheck(
                 name=check_name, category=category, status=CheckStatus.SKIPPED,
                 required=False, detail=f"Blocked, could not execute: {step.detail}",
+                latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
+            ))
+        elif step.status == BrowserStepStatus.NOT_RUN:
+            # Unmeasured, never failed: the deadline fired first. The
+            # required flag is kept (it WAS required) so coverage and
+            # the verdict treat it as missing evidence, not a pass.
+            checks.append(VerificationCheck(
+                name=check_name, category=category, status=CheckStatus.UNAVAILABLE,
+                required=is_required, detail=f"Not run: {step.detail}",
                 latency_s=latency, chain=list(step.chain or []), hop_durations_ms=list(step.hop_durations_ms or []),
             ))
         else:
@@ -1319,6 +1395,8 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
             except Exception:  # noqa: BLE001 - screenshot loss must not fail the run
                 data_url = ""
         screenshots.append(BrowserScreenshot(name=name, data_url=data_url))
+    timed_out = report.get("deadline_exceeded") is True or any(
+        s.status == BrowserStepStatus.NOT_RUN for s in steps)
     return BrowserTestResult(
         available=True,
         browser=str(report.get("browser", ""))[:100],
@@ -1326,4 +1404,5 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
         screenshots=screenshots,
         latency_s=round(time.perf_counter() - started, 1),
         transport_retries=0,
+        script_timeout=timed_out,
     )

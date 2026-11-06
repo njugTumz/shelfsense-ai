@@ -55,6 +55,9 @@ class BrowserStepStatus(str, Enum):
     FAIL = "fail"
     NOT_APPLICABLE = "not_applicable"
     BLOCKED = "blocked"
+    #: The internal deadline fired before this step started: unmeasured,
+    #: never a failure. Maps to an UNAVAILABLE check.
+    NOT_RUN = "not_run"
 
 
 class BrowserStep(BaseModel):
@@ -87,6 +90,10 @@ class BrowserTestResult(BaseModel):
     transport_failed: bool = False
     #: Automatic transport retries consumed by this run (0 or 1).
     transport_retries: int = 0
+    #: The run hit a time budget (internal step deadline or the 900s
+    #: invocation budget) rather than a transport break. INCONCLUSIVE
+    #: with timeout copy, distinct from infrastructure failure.
+    script_timeout: bool = False
 
 
 class E2BVerification(BaseModel):
@@ -105,6 +112,8 @@ class E2BVerification(BaseModel):
     transport_failed: bool = False
     #: Automatic transport retries consumed across this run.
     transport_retries: int = 0
+    #: Mirrors the browser result: the run timed out (see above).
+    script_timeout: bool = False
 
 
 class AuditVerdict(str, Enum):
@@ -163,7 +172,7 @@ class VerificationStatus(str, Enum):
 
 VerdictReason = Literal[
     "clean", "warnings", "runtime", "audit", "audit_unavailable", "e2b_unavailable",
-    "transport",
+    "transport", "script_timeout",
 ]
 
 BLOCKING_SEVERITIES = frozenset({FindingSeverity.CRITICAL, FindingSeverity.HIGH})
@@ -187,8 +196,8 @@ def compute_verdict(
     - FAILED: a required check failed, a blocking (critical/high) audit
       finding exists, or E2B was unavailable. Lack of coverage evidence
       alone never yields FAILED.
-    - INCONCLUSIVE: sandbox transport (not the app) ended the run early
-      after the automatic retry. Executed required failures still win:
+    - INCONCLUSIVE: sandbox transport or a time budget (not the app)
+      ended the run early. Executed required failures still win:
       observed app breakage is FAILED even when transport also failed.
     - AUDIT_LIMITED: the app works and deterministic checks pass, but the
       independent AI audit could not complete. Never used for Glimmer.
@@ -204,6 +213,8 @@ def compute_verdict(
         return VerificationStatus.FAILED, "runtime"
     if e2b.transport_failed:
         return VerificationStatus.INCONCLUSIVE, "transport"
+    if e2b.script_timeout:
+        return VerificationStatus.INCONCLUSIVE, "script_timeout"
     if not e2b.passed:
         return VerificationStatus.FAILED, "runtime"
     if not audit.available or not audit.completed:

@@ -23,6 +23,7 @@ from app.demo.restaurant_app import (
     ORDER_LOGIC_TEST_MJS,
 )
 from app.models.verification import (
+    BrowserStepStatus,
     BrowserTestResult,
     CheckCategory,
     CheckStatus,
@@ -31,6 +32,7 @@ from app.models.verification import (
     summarize_e2b,
 )
 from app.services.browser_workflow import (
+    STEP_CHECK_NAMES,
     _is_transport_error,
     _with_transport_retry,
     browser_steps_to_checks,
@@ -361,6 +363,8 @@ def verify_in_e2b(
                 checks.extend(browser_steps_to_checks(browser_result, required_steps))
 
         browser_failed = bool(browser_result is not None and browser_result.transport_failed)
+        browser_timed_out = bool(
+            browser_result is not None and browser_result.script_timeout)
         transport_retries += (
             browser_result.transport_retries if browser_result is not None else 0
         )
@@ -369,6 +373,14 @@ def verify_in_e2b(
             error = (
                 f"E2B transport failed after {browser_result.transport_retries + 1} "
                 f"attempt(s): {browser_result.error}"
+            )
+        elif browser_timed_out and browser_result is not None:
+            ran = sum(1 for s in browser_result.steps
+                      if s.status != BrowserStepStatus.NOT_RUN)
+            error = (
+                f"Verification timed out: {ran} of {len(STEP_CHECK_NAMES)} "
+                "browser steps ran; the rest were not attempted "
+                "(re-run verification)."
             )
         else:
             error = "" if passed else "One or more required checks failed."
@@ -381,6 +393,7 @@ def verify_in_e2b(
             browser=browser_result,
             transport_failed=browser_failed,
             transport_retries=transport_retries,
+            script_timeout=browser_timed_out,
         )
     except Exception as exc:  # noqa: BLE001 - record the real failure, then kill
         if _is_transport_error(exc):
@@ -431,9 +444,10 @@ def _done(
     browser: BrowserTestResult | None = None,
     transport_failed: bool = False,
     transport_retries: int = 0,
+    script_timeout: bool = False,
 ) -> E2BVerification:
     passed = summarize_e2b(checks)
-    if transport_failed:
+    if transport_failed or script_timeout:
         passed = False
     return E2BVerification(
         available=True,
@@ -446,4 +460,5 @@ def _done(
         browser=browser,
         transport_failed=transport_failed,
         transport_retries=transport_retries,
+        script_timeout=script_timeout,
     )

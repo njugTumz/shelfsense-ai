@@ -172,11 +172,17 @@ def run_mission_verification(
     elif status == MissionStatus.AUDIT_LIMITED:
         mission.error = f"Independent AI audit unavailable: {audit.error}".strip()
     elif status == MissionStatus.INCONCLUSIVE:
-        mission.error = (
-            f"Verification inconclusive after {e2b.transport_retries} automatic "
-            f"retr{'y' if e2b.transport_retries == 1 else 'ies'}: "
-            f"{e2b.error} The app was not proven broken; re-run verification."
-        ).strip()
+        if e2b.script_timeout:
+            mission.error = (
+                f"Verification timed out: {e2b.error} "
+                "The app was not proven broken; re-run verification."
+            ).strip()
+        else:
+            mission.error = (
+                f"Verification inconclusive after {e2b.transport_retries} automatic "
+                f"retr{'y' if e2b.transport_retries == 1 else 'ies'}: "
+                f"{e2b.error} The app was not proven broken; re-run verification."
+            ).strip()
     mission.progress_step = ""
     mission.progress_label = ""
     save_mission(mission, db_path)
