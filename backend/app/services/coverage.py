@@ -188,7 +188,11 @@ def _transition_met(
         covered.update(s for s in statuses if s in ADVANCE_COVERED_STATUSES)
     for name in passed:
         if name in _TRANSITION_CHECKS:
-            covered.update(s for s in statuses if s in (chains.get(name) or ()))
+            # Case-insensitive: the walker records the app's own display
+            # casing (SERVED), criteria parse to canonical names (Served);
+            # they name the same traversed lifecycle status.
+            traversed = {c.lower() for c in (chains.get(name) or ())}
+            covered.update(s for s in statuses if s.lower() in traversed)
     missing = [s for s in statuses if s not in covered]
     return (not missing), missing
 

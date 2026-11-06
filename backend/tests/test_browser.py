@@ -1479,3 +1479,39 @@ def test_not_run_without_flag_still_flags_timeout() -> None:
          "screenshots": []})
     result = run_browser_tests(_stub_sandbox(stdout), "http://stub/")
     assert result.script_timeout is True
+
+
+def test_walker_chain_matching_ignores_case() -> None:
+    """3306 regression: the walker records the app's display casing
+    (SERVED); criteria parse to canonical names (Served). Traversed
+    evidence must credit regardless of case."""
+    from app.services.coverage import evaluate_acceptance_criteria
+
+    text = "Staff can move an order from Ready to Served."
+    upper = _passing_e2b(
+        ["browser_advances_status", "browser_walks_full_lifecycle"],
+        chains={"browser_walks_full_lifecycle": ["READY", "SERVED"]},
+    )
+    (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), upper)
+    assert mapping.status.value == "supported"
+    mixed = _passing_e2b(
+        ["browser_advances_status", "browser_walks_full_lifecycle"],
+        chains={"browser_walks_full_lifecycle": ["Ready", "SERVED", "COMPLETED"]},
+    )
+    (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), mixed)
+    assert mapping.status.value == "supported"
+
+
+def test_case_insensitive_chain_still_requires_traversal() -> None:
+    """Case-insensitivity credits casing variants only: an untraversed
+    status stays beyond evidence (no relaxation)."""
+    from app.services.coverage import evaluate_acceptance_criteria
+
+    text = "Staff can move an order from Ready to Served."
+    short = _passing_e2b(
+        ["browser_advances_status", "browser_walks_full_lifecycle"],
+        chains={"browser_walks_full_lifecycle": ["READY"]},
+    )
+    (mapping,) = evaluate_acceptance_criteria(_acceptance_spec([text]), short)
+    assert mapping.status.value == "partial"
+    assert "Served" in mapping.detail
