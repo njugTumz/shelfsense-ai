@@ -28,6 +28,7 @@ from app.models.verification import (
     CheckCategory,
     CheckStatus,
     E2BVerification,
+    SandboxDiagnostics,
     VerificationCheck,
     has_no_browser_evidence,
     summarize_e2b,
@@ -49,6 +50,76 @@ PREVIEW_POLL_S = 90
 HTTP_TIMEOUT_S = 10.0
 DETAIL_BUDGET = 3000
 IN_SANDBOX_PREVIEW_URL = f"http://localhost:{PORT}"
+#: One diagnostics snapshot: RAM + swap, top memory consumers, swap
+#: devices, OOM-killer lines. Each section carries its own 2>&1 so a
+#: missing tool (or a denied dmesg) degrades to a visible note
+#: instead of blanking the snapshot.
+DIAGNOSTICS_COMMAND = (
+    "echo '=== free -m ==='; free -m 2>&1; "
+    "echo '=== top mem (ps) ==='; ps aux --sort=-%mem 2>&1 | head -20; "
+    "echo '=== swaps ==='; cat /proc/swaps 2>&1; "
+    "echo '=== dmesg oom ==='; dmesg 2>&1 | grep -i -E 'oom|killed process|out of memory' | tail -20; "
+    "echo '=== uptime ==='; uptime 2>&1"
+)
+DIAGNOSTICS_TIMEOUT_S = 60
+DIAGNOSTICS_BUDGET = 4000
+
+
+def _capture_sandbox_diagnostics(run, phase: str) -> str:
+    """One diagnostics snapshot via an independent sandbox command.
+
+    ``run`` is the (label, cmd, **kwargs) -> (result, err, seconds)
+    helper. Never raises: every failure mode is recorded as text so a
+    dead sandbox cannot break verification a second time.
+    """
+    try:
+        result, err, dt = run(
+            f"sandbox diagnostics ({phase})",
+            DIAGNOSTICS_COMMAND,
+            timeout=DIAGNOSTICS_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 - record, never raise
+        return f"diagnostics capture failed: {type(exc).__name__}: {exc}"
+    if err:
+        return f"diagnostics command failed in {dt:.1f}s:\n{err}"[:DIAGNOSTICS_BUDGET]
+    out = getattr(result, "stdout", "") or ""
+    return f"captured in {dt:.1f}s:\n{out}"[:DIAGNOSTICS_BUDGET]
+
+
+def _run_browser_phase(sbx, run, emit, required_steps):
+    """Browser setup + script with diagnostics bracketing the script.
+
+    Returns (browser_result, phase_checks, diagnostics). The after
+    snapshot runs in a finally, so even a raised script call leaves a
+    before/after pair (each independently best-effort).
+    """
+    emit("browser_tests", "Running real browser workflow tests…")
+    setup_error = ""
+    for label, cmd, cmd_timeout in BROWSER_SETUP_COMMANDS:
+        _, err, _ = run(label, cmd, timeout=cmd_timeout)
+        if err:
+            setup_error = err
+            break
+    phase_checks: list[VerificationCheck] = []
+    diagnostics = SandboxDiagnostics()
+    if setup_error:
+        browser_result = BrowserTestResult(
+            available=False, error=f"Browser setup failed: {setup_error}"[:800])
+        phase_checks.extend(
+            unavailable_browser_checks(required_steps, browser_result.error))
+        return browser_result, phase_checks, diagnostics
+    diagnostics.before_browser = _capture_sandbox_diagnostics(run, "before")
+    try:
+        browser_result = run_browser_tests(sbx, IN_SANDBOX_PREVIEW_URL)
+    finally:
+        diagnostics.after_browser = _capture_sandbox_diagnostics(run, "after")
+    if not browser_result.available:
+        phase_checks.extend(
+            unavailable_browser_checks(required_steps, browser_result.error))
+    else:
+        phase_checks.extend(
+            browser_steps_to_checks(browser_result, required_steps))
+    return browser_result, phase_checks, diagnostics
 
 #: FIELD-fixed browser setup (the model supplies no shell commands).
 BROWSER_SETUP_COMMANDS = (
@@ -345,23 +416,9 @@ def verify_in_e2b(
             )
 
         required_steps = determine_required_steps(acceptance_criteria)
-        emit("browser_tests", "Running real browser workflow tests…")
-        setup_error = ""
-        for label, cmd, cmd_timeout in BROWSER_SETUP_COMMANDS:
-            _, err, _ = run(label, cmd, timeout=cmd_timeout)
-            if err:
-                setup_error = err
-                break
-        browser_result: BrowserTestResult | None
-        if setup_error:
-            browser_result = BrowserTestResult(available=False, error=f"Browser setup failed: {setup_error}"[:800])
-            checks.extend(unavailable_browser_checks(required_steps, browser_result.error))
-        else:
-            browser_result = run_browser_tests(sbx, IN_SANDBOX_PREVIEW_URL)
-            if not browser_result.available:
-                checks.extend(unavailable_browser_checks(required_steps, browser_result.error))
-            else:
-                checks.extend(browser_steps_to_checks(browser_result, required_steps))
+        browser_result, phase_checks, diagnostics = _run_browser_phase(
+            sbx, run, emit, required_steps)
+        checks.extend(phase_checks)
 
         browser_failed = bool(browser_result is not None and browser_result.transport_failed)
         browser_timed_out = bool(
@@ -402,6 +459,7 @@ def verify_in_e2b(
             transport_failed=browser_failed,
             transport_retries=transport_retries,
             script_timeout=browser_timed_out,
+            diagnostics=diagnostics,
         )
     except Exception as exc:  # noqa: BLE001 - record the real failure, then kill
         if _is_transport_error(exc):
@@ -429,11 +487,16 @@ def verify_in_e2b(
             sandbox_id = sbx.sandbox_id if sbx is not None else ""
         except Exception:  # noqa: BLE001, S110
             pass
+        try:
+            failure_diag = _capture_sandbox_diagnostics(run, "after-failure")
+        except Exception:  # noqa: BLE001 - run unbound if create failed
+            failure_diag = ""
         return _done(
             checks, preview_url, sandbox_id, started,
             f"E2B run failed: {type(exc).__name__}: {exc}",
             transport_failed=_is_transport_error(exc),
             transport_retries=transport_retries,
+            diagnostics=SandboxDiagnostics(after_browser=failure_diag),
         )
     finally:
         if sbx is not None:
@@ -453,6 +516,7 @@ def _done(
     transport_failed: bool = False,
     transport_retries: int = 0,
     script_timeout: bool = False,
+    diagnostics: SandboxDiagnostics | None = None,
 ) -> E2BVerification:
     passed = summarize_e2b(checks)
     if transport_failed or script_timeout:
@@ -469,4 +533,5 @@ def _done(
         transport_failed=transport_failed,
         transport_retries=transport_retries,
         script_timeout=script_timeout,
+        diagnostics=diagnostics or SandboxDiagnostics(),
     )

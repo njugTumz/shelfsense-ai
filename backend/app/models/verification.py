@@ -96,6 +96,18 @@ class BrowserTestResult(BaseModel):
     script_timeout: bool = False
 
 
+class SandboxDiagnostics(BaseModel):
+    """Memory/pressure snapshots around the browser phase (evidence only).
+
+    Captured via independent sandbox commands, so a dead script
+    invocation still leaves a before/after pair. A failed capture is
+    recorded as text, never fatal to verification.
+    """
+
+    before_browser: str = ""
+    after_browser: str = ""
+
+
 class E2BVerification(BaseModel):
     """Deterministic execution evidence from an E2B sandbox run."""
 
@@ -114,6 +126,8 @@ class E2BVerification(BaseModel):
     transport_retries: int = 0
     #: Mirrors the browser result: the run timed out (see above).
     script_timeout: bool = False
+    #: Sandbox memory/pressure snapshots around the browser phase.
+    diagnostics: SandboxDiagnostics = Field(default_factory=SandboxDiagnostics)
 
 
 class AuditVerdict(str, Enum):
