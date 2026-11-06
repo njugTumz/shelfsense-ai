@@ -42,6 +42,11 @@ SCREENSHOT_JPG_QUALITY = 60
 #: staying inside the 1200s sandbox cap. Sandbox cap and all other
 #: timeouts are unchanged.
 BROWSER_SCRIPT_TIMEOUT_S = 900
+#: JSONL progress the template appends per recorded step (mirrored on
+#: stdout as BROWSER_STEP lines). MUST match PROGRESS_PATH in
+#: BROWSER_SCRIPT. Read back after a budget timeout so a killed run
+#: still returns the steps it completed.
+BROWSER_PROGRESS_PATH = "/tmp/browser_progress.jsonl"
 
 CREATE_KEYWORDS = ("create", "add", "new order", "entry", "submit", "form")
 ADVANCE_KEYWORDS = ("status", "transition", "preparing", "ready", "move", "advance", "update")
@@ -269,6 +274,15 @@ from browser_assert import (
 )
 
 URL, MARKER = sys.argv[1], sys.argv[2]
+# Every recorded step is appended here (one JSON object per line) AND
+# echoed as a BROWSER_STEP stdout line, so a budget kill that discards
+# the final report still leaves retrievable partial evidence behind.
+# MUST match BROWSER_PROGRESS_PATH in the Python driver below.
+PROGRESS_PATH = "/tmp/browser_progress.jsonl"
+try:
+    open(PROGRESS_PATH, "w").close()
+except Exception:
+    pass
 ADVANCE_BUTTON = re.compile("advance|next|move|mark|progress|forward", re.I)
 SUBMIT_BUTTON = re.compile("add|create|submit|save|new order", re.I)
 
@@ -280,9 +294,19 @@ def main():
     shots = []
 
     def rec(name, status, detail="", ms=0, chain=None, hops=None):
-        steps.append({"name": name, "status": status, "detail": detail[:800],
-                      "duration_ms": int(ms), "chain": list(chain or []),
-                      "hop_durations_ms": [int(h) for h in (hops or [])]})
+        entry = {"name": name, "status": status, "detail": detail[:800],
+                 "duration_ms": int(ms), "chain": list(chain or []),
+                 "hop_durations_ms": [int(h) for h in (hops or [])]}
+        steps.append(entry)
+        try:
+            with open(PROGRESS_PATH, "a") as progress_file:
+                progress_file.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
+        try:
+            print("BROWSER_STEP:" + json.dumps(entry), flush=True)
+        except Exception:
+            pass
 
     def shot(page, name):
         try:
@@ -1129,6 +1153,70 @@ def _with_transport_retry(fn, delay_s: float = 10.0, sleep=time.sleep):
             return None, 1, second
 
 
+def _browser_step_from_entry(entry: object) -> BrowserStep:
+    """One report/progress entry into a BrowserStep (malformed -> FAIL)."""
+    if not isinstance(entry, dict):
+        return BrowserStep(name="?", status=BrowserStepStatus.FAIL,
+                           detail="Malformed step entry in browser report.")
+    try:
+        raw_chain = entry.get("chain", [])
+        if isinstance(raw_chain, list):
+            chain = [s for s in raw_chain if isinstance(s, str)]
+        else:
+            chain = []
+        raw_hops = entry.get("hop_durations_ms", [])
+        if isinstance(raw_hops, list):
+            hops = [int(h) for h in raw_hops
+                    if isinstance(h, (int, float)) and not isinstance(h, bool)]
+        else:
+            hops = []
+        return BrowserStep(
+            name=str(entry.get("name", "?")),
+            status=BrowserStepStatus(str(entry.get("status", "fail"))),
+            detail=str(entry.get("detail", ""))[:800],
+            duration_ms=int(entry.get("duration_ms", 0) or 0),
+            chain=chain,
+            hop_durations_ms=hops,
+        )
+    except (ValueError, TypeError, AttributeError):
+        return BrowserStep(name="?", status=BrowserStepStatus.FAIL,
+                           detail="Malformed step entry in browser report.")
+
+
+def _read_progress_steps(sbx) -> list[BrowserStep]:
+    """Steps the template flushed before a budget kill (best-effort).
+
+    A torn final line (killed mid-write) is skipped, never fatal: a
+    partial line is not evidence. Any read failure yields no steps.
+    """
+    try:
+        raw = sbx.files.read(BROWSER_PROGRESS_PATH)
+    except Exception:  # noqa: BLE001 - missing/unreachable file, no partials
+        return []
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - undecodable, no partials
+            return []
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        return []
+    steps: list[BrowserStep] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        step = _browser_step_from_entry(entry)
+        if step.name != "?" or step.detail != "Malformed step entry in browser report.":
+            steps.append(step)
+    return steps
+
+
 def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     """Upload and run the FIELD-owned workflow script in the sandbox.
 
@@ -1137,6 +1225,8 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     and screenshot cross-talk in a 473MB sandbox). Transport failures
     go straight to INCONCLUSIVE with transport_retries=0; retry lives
     only at sandbox-create and file-upload, where nothing runs yet.
+    A budget timeout additionally retrieves the steps the template
+    flushed to its progress file, so the verdict carries evidence.
     """
     started = time.perf_counter()
     sbx.files.write(BROWSER_ASSERT_PATH, BROWSER_ASSERT_SOURCE)
@@ -1168,7 +1258,19 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
     try:
         result = invoke()
     except Exception as exc:  # noqa: BLE001 - classified below, never retried
-        if isinstance(exc, (_ScriptBudgetTimeout, _PollingTimeout)):
+        partial: list[BrowserStep] = []
+        if isinstance(exc, _ScriptBudgetTimeout):
+            # The kill discards the final report, but flushed steps
+            # survive in the progress file: retrieve them as evidence.
+            partial = _read_progress_steps(sbx)
+            error = f"{exc}"[:800]
+            if partial:
+                error = (
+                    f"{len(partial)} of {len(STEP_CHECK_NAMES)} steps recorded "
+                    f"before the budget fired. {error}"
+                )[:800]
+            transport = True
+        elif isinstance(exc, _PollingTimeout):
             error, transport = f"{exc}"[:800], True
         elif _is_transport_error(exc):
             error = (
@@ -1182,6 +1284,7 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
         return BrowserTestResult(
             available=False,
             error=error,
+            steps=partial,
             latency_s=round(time.perf_counter() - started, 1),
             transport_failed=transport,
             transport_retries=0,
@@ -1202,31 +1305,7 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
             latency_s=round(time.perf_counter() - started, 1),
             transport_retries=0,
         )
-    steps: list[BrowserStep] = []
-    for entry in report["steps"]:
-        try:
-            raw_chain = entry.get("chain", [])
-            if isinstance(raw_chain, list):
-                chain = [s for s in raw_chain if isinstance(s, str)]
-            else:
-                chain = []
-            raw_hops = entry.get("hop_durations_ms", [])
-            if isinstance(raw_hops, list):
-                hops = [int(h) for h in raw_hops
-                        if isinstance(h, (int, float)) and not isinstance(h, bool)]
-            else:
-                hops = []
-            steps.append(BrowserStep(
-                name=str(entry.get("name", "?")),
-                status=BrowserStepStatus(str(entry.get("status", "fail"))),
-                detail=str(entry.get("detail", ""))[:800],
-                duration_ms=int(entry.get("duration_ms", 0) or 0),
-                chain=chain,
-                hop_durations_ms=hops,
-            ))
-        except (ValueError, TypeError, AttributeError):
-            steps.append(BrowserStep(name="?", status=BrowserStepStatus.FAIL,
-                                     detail="Malformed step entry in browser report."))
+    steps = [_browser_step_from_entry(entry) for entry in report["steps"]]
     screenshots: list[BrowserScreenshot] = []
     for shot in report.get("screenshots", []) or []:
         name = str(shot.get("name", "?"))

@@ -16,6 +16,7 @@ from app.models.verification import (
 )
 from app.services.browser_workflow import (
     BROWSER_ASSERT_SOURCE,
+    BROWSER_PROGRESS_PATH,
     BROWSER_SCRIPT,
     browser_steps_to_checks,
     determine_required_steps,
@@ -1271,3 +1272,106 @@ def test_walker_status_read_ignores_button_labels_in_real_browser() -> None:
             assert "Advance" not in "".join(chain)
         finally:
             browser.close()
+
+
+def test_progress_path_shared_between_template_and_reader() -> None:
+    """The template's PROGRESS_PATH and the driver's read-back path agree;
+    rec() flushes every step to both the file and stdout."""
+    assert f'PROGRESS_PATH = "{BROWSER_PROGRESS_PATH}"' in BROWSER_SCRIPT
+    assert 'open(PROGRESS_PATH, "w").close()' in BROWSER_SCRIPT
+    assert 'open(PROGRESS_PATH, "a")' in BROWSER_SCRIPT
+    assert '"BROWSER_STEP:"' in BROWSER_SCRIPT
+
+
+def test_template_flushes_each_step_to_file_and_stdout(tmp_path, monkeypatch) -> None:
+    """Behavioral: a real local Chromium run leaves one JSONL line and one
+    BROWSER_STEP stdout line per recorded step. Skips without Chromium."""
+    import contextlib
+    import json
+    import os
+    import time
+
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        try:
+            probe = pw.chromium.launch()
+            probe.close()
+        except Exception as exc:
+            pytest.skip(f"chromium not available: {exc}")
+    try:
+        os.remove(BROWSER_PROGRESS_PATH)
+    except OSError:
+        pass
+    try:
+        serve = contextlib.contextmanager(_serve_fixture)
+        with serve(_SEAM_APP_HTML) as base:
+            marker = f"PROG-{int(time.time())}"
+            stdout = _run_template_locally(base, marker, tmp_path, monkeypatch)
+        report_line = next(
+            line for line in stdout.splitlines() if line.startswith("BROWSER_JSON:"))
+        names = [s["name"] for s in json.loads(
+            report_line[len("BROWSER_JSON:"):])["steps"]]
+        assert names, "template recorded no steps"
+        with open(BROWSER_PROGRESS_PATH) as handle:
+            flushed = [json.loads(line) for line in handle if line.strip()]
+        assert [s["name"] for s in flushed] == names
+        echoed = [line for line in stdout.splitlines()
+                  if line.startswith("BROWSER_STEP:")]
+        assert [json.loads(line[len("BROWSER_STEP:"):])["name"]
+               for line in echoed] == names
+    finally:
+        try:
+            os.remove(BROWSER_PROGRESS_PATH)
+        except OSError:
+            pass
+
+
+def _stub_timeout_with_progress(progress: object) -> object:
+    """Sandbox stub: the invocation burns the budget; the progress file
+    then reads back ``progress`` (str) or raises it (an exception)."""
+    e2b = pytest.importorskip("e2b")
+    from unittest.mock import MagicMock
+
+    sbx = MagicMock()
+    sbx.commands.run.side_effect = e2b.TimeoutException("deadline_exceeded")
+    if isinstance(progress, Exception):
+        sbx.files.read.side_effect = progress
+    else:
+        sbx.files.read.return_value = progress
+    return sbx
+
+
+def test_budget_timeout_retrieves_partial_progress() -> None:
+    """A killed run returns the steps it flushed; a torn final line is
+    skipped, never fatal. Flags are unchanged by partial retrieval."""
+    import json
+
+    lines = "\n".join([
+        json.dumps({"name": "load", "status": "pass",
+                    "detail": "loaded", "duration_ms": 12000}),
+        json.dumps({"name": "create", "status": "pass",
+                    "detail": "created", "duration_ms": 8000,
+                    "chain": ["Received"]}),
+        '{"name": "advance", "status": "pas',  # torn mid-write kill
+    ])
+    result = run_browser_tests(
+        _stub_timeout_with_progress(lines), "http://stub/")
+    assert result.available is False
+    assert result.transport_failed is True
+    assert [s.name for s in result.steps] == ["load", "create"]
+    assert result.steps[1].chain == ["Received"]
+    assert "2 of 9 steps recorded" in result.error
+    assert "timed out after 900s" in result.error
+
+
+def test_budget_timeout_without_progress_file_stays_empty() -> None:
+    """No progress file (launch wedge): empty steps, timeout copy intact."""
+    result = run_browser_tests(
+        _stub_timeout_with_progress(FileNotFoundError("gone")), "http://stub/")
+    assert result.available is False
+    assert result.steps == []
+    assert "steps recorded" not in result.error
+    assert "timed out after 900s" in result.error
+    assert "not retried" in result.error
