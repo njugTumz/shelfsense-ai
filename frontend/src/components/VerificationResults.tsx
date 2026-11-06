@@ -149,7 +149,13 @@ export default function VerificationResults({ result }: { result: VerificationRe
       </h3>
       {result.status === "INCONCLUSIVE" && (
         <p className="mt-2 text-stone-600">
-          {result.e2b.script_timeout ? (
+          {result.reason === "no_browser_evidence" ? (
+            <>
+              Verification ended without browser evidence: the app built and the
+              preview served, but no browser step executed. The app was not proven
+              broken — re-run verification.
+            </>
+          ) : result.e2b.script_timeout ? (
             <>
               Verification timed out before all browser steps ran{result.e2b.error !== "" ? `: ${result.e2b.error}` : ""}{" "}
               The app was not proven broken — re-run verification.

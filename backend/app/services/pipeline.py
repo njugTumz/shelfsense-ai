@@ -172,7 +172,12 @@ def run_mission_verification(
     elif status == MissionStatus.AUDIT_LIMITED:
         mission.error = f"Independent AI audit unavailable: {audit.error}".strip()
     elif status == MissionStatus.INCONCLUSIVE:
-        if e2b.script_timeout:
+        if reason == "no_browser_evidence":
+            mission.error = (
+                "Verification ended without browser evidence: "
+                f"{e2b.error} The app was not proven broken; re-run verification."
+            ).strip()
+        elif e2b.script_timeout:
             mission.error = (
                 f"Verification timed out: {e2b.error} "
                 "The app was not proven broken; re-run verification."

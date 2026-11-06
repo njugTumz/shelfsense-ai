@@ -1146,13 +1146,25 @@ _E2B_TRANSIENT_ERROR_NAMES = (
 def _is_transport_error(exc: BaseException) -> bool:
     """Whether the failure is sandbox transport rather than the app.
 
-    Type-based only: httpx transport errors plus the transient E2B SDK
-    errors above. Never message-sniffed, so app failures cannot be
-    misclassified by wording.
+    Type-based only: httpx transport errors, raw httpcore transport
+    errors (the E2B SDK's own guards catch httpx types, so a raw
+    httpcore leak such as the 3306-rerun stream break travels all the
+    way up), plus the transient E2B SDK errors above. Never
+    message-sniffed, so app failures cannot be misclassified by wording.
+    httpcore timeouts route here (not to the polling-unknown copy that
+    httpx timeouts keep); both are INCONCLUSIVE, never retried.
     """
+    import httpcore
     import httpx
 
     if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, (
+        httpcore.ConnectError,
+        httpcore.ReadError,
+        httpcore.WriteError,
+        httpcore.TimeoutException,
+    )):
         return True
     try:
         import e2b

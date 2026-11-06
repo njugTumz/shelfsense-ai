@@ -29,6 +29,7 @@ from app.models.verification import (
     CheckStatus,
     E2BVerification,
     VerificationCheck,
+    has_no_browser_evidence,
     summarize_e2b,
 )
 from app.services.browser_workflow import (
@@ -381,6 +382,13 @@ def verify_in_e2b(
                 f"Verification timed out: {ran} of {len(STEP_CHECK_NAMES)} "
                 "browser steps ran; the rest were not attempted "
                 "(re-run verification)."
+            )
+        elif has_no_browser_evidence(E2BVerification(
+                available=True, passed=passed, checks=checks,
+                browser=browser_result)):
+            error = (
+                "Browser phase produced no executed steps; the app built "
+                "and the preview served (re-run verification)."
             )
         else:
             error = "" if passed else "One or more required checks failed."

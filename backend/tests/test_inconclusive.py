@@ -12,15 +12,21 @@ from app.models.verification import (
     AuditFinding,
     AuditResult,
     AuditVerdict,
+    BROWSER_CHECK_NAMES,
+    BrowserStep,
+    BrowserStepStatus,
+    BrowserTestResult,
     CheckCategory,
     CheckStatus,
     E2BVerification,
     VerificationCheck,
     VerificationStatus,
     compute_verdict,
+    has_no_browser_evidence,
 )
 from app.services.browser_workflow import (
     BROWSER_SCRIPT_TIMEOUT_S,
+    STEP_CHECK_NAMES,
     _is_polling_timeout,
     _is_script_budget_timeout,
     _is_transport_error,
@@ -341,6 +347,9 @@ def test_inconclusive_ui_contract() -> None:
     assert "result.e2b.script_timeout" in results
     assert "Verification timed out before all browser steps ran" in results
     assert "infrastructure failed" in results
+    # Zero-evidence runs get their own copy keyed off the reason.
+    assert 'result.reason === "no_browser_evidence"' in results
+    assert "Verification ended without browser evidence" in results
     # Unmeasured checks fall through to the neutral glyph/tone: no
     # special-case may paint them red.
     assert 'status === "unavailable"' not in results
@@ -402,3 +411,119 @@ def test_verdict_transport_wins_over_script_timeout() -> None:
     )
     assert compute_verdict(e2b, clean) == (
         VerificationStatus.INCONCLUSIVE, "transport")
+
+
+def test_transport_taxonomy_httpcore() -> None:
+    """Raw httpcore leaks (the E2B SDK guards httpx types only) are
+    transport, including timeouts. Non-transport stays out."""
+    import httpcore
+
+    for cls in (
+        httpcore.ConnectError,
+        httpcore.ReadError,
+        httpcore.WriteError,
+        httpcore.TimeoutException,
+        httpcore.ConnectTimeout,
+        httpcore.ReadTimeout,
+        httpcore.WriteTimeout,
+        httpcore.PoolTimeout,
+    ):
+        assert _is_transport_error(cls("boom")) is True, cls
+    assert _is_transport_error(ValueError("boom")) is False
+    assert _is_transport_error(httpcore.ProtocolError("boom")) is False
+
+
+def test_browser_run_httpcore_connect_error_is_transport() -> None:
+    """Replay of the 3306-rerun stream break at the unit level: a raw
+    httpcore.ConnectError goes straight to INCONCLUSIVE-transport."""
+    import httpcore
+
+    sbx = _stub_commands([httpcore.ConnectError("stream error received")])
+    result = run_browser_tests(sbx, "http://stub/")
+    assert result.available is False
+    assert result.transport_failed is True
+    assert result.script_timeout is False
+    assert result.transport_retries == 0
+    assert "not retried; re-run verification" in result.error
+    assert sbx.commands.run.call_count == 1
+
+
+def test_browser_check_names_match_step_map() -> None:
+    """Contract: the verdict's browser-check set equals the driver's
+    step->check map values, so the structural rule cannot drift."""
+    assert set(STEP_CHECK_NAMES.values()) == set(BROWSER_CHECK_NAMES)
+    assert len(BROWSER_CHECK_NAMES) == 9
+
+
+def _no_evidence_e2b(**overrides):
+    """Rerun-shaped E2B result: build green, browser checks unmeasured."""
+    checks = [
+        _check("sandbox_create", CheckStatus.PASS, required=False),
+        _check("node_runtime", CheckStatus.PASS),
+        _check("production_build", CheckStatus.PASS),
+        _check("preview_serves", CheckStatus.PASS),
+        _check("browser_loads_app", CheckStatus.UNAVAILABLE),
+        _check("browser_creates_order", CheckStatus.UNAVAILABLE),
+        _check("browser_advances_status", CheckStatus.UNAVAILABLE),
+    ]
+    browser = BrowserTestResult(available=False, steps=[])
+    values = dict(available=True, passed=False, checks=checks, browser=browser)
+    values.update(overrides)
+    return E2BVerification(**values)
+
+
+def test_no_browser_evidence_predicate() -> None:
+    assert has_no_browser_evidence(_no_evidence_e2b()) is True
+    # An executed failure is evidence: the rule stays out.
+    failed_step = _no_evidence_e2b(browser=BrowserTestResult(
+        available=False, steps=[BrowserStep(
+            name="load", status=BrowserStepStatus.FAIL, detail="boom")]))
+    assert has_no_browser_evidence(failed_step) is False
+    # No browser result at all: cannot confirm, stays out.
+    assert has_no_browser_evidence(_no_evidence_e2b(browser=None)) is False
+    # A required non-browser check unmeasured: not a browser-only gap.
+    missing_build = _no_evidence_e2b(checks=[
+        _check("production_build", CheckStatus.UNAVAILABLE),
+        _check("preview_serves", CheckStatus.PASS),
+        _check("browser_loads_app", CheckStatus.UNAVAILABLE),
+    ])
+    assert has_no_browser_evidence(missing_build) is False
+
+
+def test_verdict_no_browser_evidence_matrix() -> None:
+    clean = _audit(verdict=AuditVerdict.PASS)
+    assert compute_verdict(_no_evidence_e2b(), clean) == (
+        VerificationStatus.INCONCLUSIVE, "no_browser_evidence")
+    # Executed required failures still win.
+    failed = _no_evidence_e2b(checks=[
+        _check("production_build", CheckStatus.PASS),
+        _check("preview_serves", CheckStatus.PASS),
+        _check("browser_loads_app", CheckStatus.FAIL),
+    ])
+    assert compute_verdict(failed, clean) == (VerificationStatus.FAILED, "runtime")
+    # Specific flags keep precedence over the structural rule.
+    assert compute_verdict(
+        _no_evidence_e2b(transport_failed=True), clean) == (
+        VerificationStatus.INCONCLUSIVE, "transport")
+    assert compute_verdict(
+        _no_evidence_e2b(script_timeout=True), clean) == (
+        VerificationStatus.INCONCLUSIVE, "script_timeout")
+
+
+def test_replay_3306_rerun_is_inconclusive() -> None:
+    """The stored 3306-rerun result replays to INCONCLUSIVE through the
+    structural rule (it verdict FAILED live only via the taxonomy gap)."""
+    import json
+    from pathlib import Path
+
+    stored = Path("/home/izaktumz/field_evidence/3306-live-20261106-rerun/checks.json")
+    if not stored.exists():
+        pytest.skip("rerun evidence not present in this environment")
+    payload = json.loads(stored.read_text())["verification"]
+    e2b = E2BVerification(**payload["e2b"])
+    audit = AuditResult(**payload["audit"])
+    assert e2b.transport_failed is False
+    assert e2b.script_timeout is False
+    assert has_no_browser_evidence(e2b) is True
+    assert compute_verdict(e2b, audit) == (
+        VerificationStatus.INCONCLUSIVE, "no_browser_evidence")

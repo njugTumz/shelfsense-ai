@@ -172,8 +172,53 @@ class VerificationStatus(str, Enum):
 
 VerdictReason = Literal[
     "clean", "warnings", "runtime", "audit", "audit_unavailable", "e2b_unavailable",
-    "transport", "script_timeout",
+    "transport", "script_timeout", "no_browser_evidence",
 ]
+
+#: Check names produced by the browser phase. Canonical home of the set;
+#: services.browser_workflow.STEP_CHECK_NAMES values must equal it
+#: (pinned by a contract test) so the verdict can tell browser-side
+#: unmeasured checks from build-side ones without importing services.
+BROWSER_CHECK_NAMES: frozenset[str] = frozenset({
+    "browser_loads_app",
+    "browser_creates_order",
+    "browser_advances_status",
+    "browser_storage_holds_status",
+    "browser_rejects_invalid",
+    "browser_persists_after_reload",
+    "browser_walks_full_lifecycle",
+    "browser_console_clean",
+    "browser_responsive_layout",
+})
+
+
+def has_no_browser_evidence(e2b: E2BVerification) -> bool:
+    """Whether the browser phase left zero executed evidence.
+
+    True only when: a browser result exists, no executed step failed,
+    and every required check either passed or is a browser-side
+    UNAVAILABLE (unmeasured, including not_run). Independent of
+    exception type names: whatever the transport taxonomy missed, a run
+    whose app built and whose preview served but whose browser produced
+    nothing is inconclusive, never failed. At least one required
+    browser check must exist, so the rule cannot fire vacuously.
+    """
+    browser = e2b.browser
+    if browser is None:
+        return False
+    if any(s.status == BrowserStepStatus.FAIL for s in browser.steps):
+        return False
+    seen_browser_required = False
+    for check in e2b.checks:
+        if not check.required:
+            continue
+        if check.status == CheckStatus.PASS:
+            continue
+        if check.status == CheckStatus.UNAVAILABLE and check.name in BROWSER_CHECK_NAMES:
+            seen_browser_required = True
+            continue
+        return False
+    return seen_browser_required
 
 BLOCKING_SEVERITIES = frozenset({FindingSeverity.CRITICAL, FindingSeverity.HIGH})
 
@@ -196,9 +241,10 @@ def compute_verdict(
     - FAILED: a required check failed, a blocking (critical/high) audit
       finding exists, or E2B was unavailable. Lack of coverage evidence
       alone never yields FAILED.
-    - INCONCLUSIVE: sandbox transport or a time budget (not the app)
-      ended the run early. Executed required failures still win:
-      observed app breakage is FAILED even when transport also failed.
+    - INCONCLUSIVE: sandbox transport, a time budget, or a browser
+      phase with zero executed evidence (not the app) ended the run
+      early. Executed required failures still win: observed app
+      breakage is FAILED even when transport also failed.
     - AUDIT_LIMITED: the app works and deterministic checks pass, but the
       independent AI audit could not complete. Never used for Glimmer.
     - VERIFIED_WITH_WARNINGS: core checks pass with non-blocking
@@ -215,6 +261,8 @@ def compute_verdict(
         return VerificationStatus.INCONCLUSIVE, "transport"
     if e2b.script_timeout:
         return VerificationStatus.INCONCLUSIVE, "script_timeout"
+    if has_no_browser_evidence(e2b):
+        return VerificationStatus.INCONCLUSIVE, "no_browser_evidence"
     if not e2b.passed:
         return VerificationStatus.FAILED, "runtime"
     if not audit.available or not audit.completed:
