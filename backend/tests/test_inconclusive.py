@@ -243,7 +243,8 @@ def test_script_budget_timeout_never_retries() -> None:
     sbx = _stub_commands([e2b.TimeoutException("deadline_exceeded")])
     result = run_browser_tests(sbx, "http://stub/")
     assert result.available is False
-    assert result.transport_failed is True
+    assert result.transport_failed is False
+    assert result.script_timeout is True
     assert result.transport_retries == 0
     assert sbx.commands.run.call_count == 1
     assert "timed out after 900s" in result.error
@@ -336,6 +337,10 @@ def test_inconclusive_ui_contract() -> None:
     assert 'result.status === "INCONCLUSIVE"' in results
     assert "re-run verification" in results
     assert "not proven broken" in results
+    # Budget exhaustion is its own copy, never "infrastructure failed".
+    assert "result.e2b.script_timeout" in results
+    assert "Verification timed out before all browser steps ran" in results
+    assert "infrastructure failed" in results
     # Unmeasured checks fall through to the neutral glyph/tone: no
     # special-case may paint them red.
     assert 'status === "unavailable"' not in results
@@ -346,6 +351,8 @@ def test_inconclusive_ui_contract() -> None:
     assert '"INCONCLUSIVE"' in api
     assert "transport_failed: boolean" in api
     assert "transport_retries: number" in api
+    assert "script_timeout: boolean" in api
+    assert '"not_run"' in api
 
     source = _frontend("components/WorkflowProgress.tsx")
     line = next(

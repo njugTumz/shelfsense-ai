@@ -149,10 +149,19 @@ export default function VerificationResults({ result }: { result: VerificationRe
       </h3>
       {result.status === "INCONCLUSIVE" && (
         <p className="mt-2 text-stone-600">
-          Verification could not complete: the E2B sandbox infrastructure failed
-          after {result.e2b.transport_retries} automatic{" "}
-          {result.e2b.transport_retries === 1 ? "retry" : "retries"}. The app was
-          not proven broken — re-run verification.
+          {result.e2b.script_timeout ? (
+            <>
+              Verification timed out before all browser steps ran{result.e2b.error !== "" ? `: ${result.e2b.error}` : ""}{" "}
+              The app was not proven broken — re-run verification.
+            </>
+          ) : (
+            <>
+              Verification could not complete: the E2B sandbox infrastructure failed
+              after {result.e2b.transport_retries} automatic{" "}
+              {result.e2b.transport_retries === 1 ? "retry" : "retries"}. The app was
+              not proven broken — re-run verification.
+            </>
+          )}
         </p>
       )}
 

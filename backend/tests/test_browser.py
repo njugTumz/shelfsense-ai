@@ -1360,7 +1360,8 @@ def test_budget_timeout_retrieves_partial_progress() -> None:
     result = run_browser_tests(
         _stub_timeout_with_progress(lines), "http://stub/")
     assert result.available is False
-    assert result.transport_failed is True
+    assert result.transport_failed is False
+    assert result.script_timeout is True
     assert [s.name for s in result.steps] == ["load", "create"]
     assert result.steps[1].chain == ["Received"]
     assert "2 of 9 steps recorded" in result.error

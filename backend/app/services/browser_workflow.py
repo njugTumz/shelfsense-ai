@@ -1335,9 +1335,12 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
         result = invoke()
     except Exception as exc:  # noqa: BLE001 - classified below, never retried
         partial: list[BrowserStep] = []
+        timed_out = False
         if isinstance(exc, _ScriptBudgetTimeout):
             # The kill discards the final report, but flushed steps
             # survive in the progress file: retrieve them as evidence.
+            # A burned budget is its own reason (script_timeout), not an
+            # infrastructure failure: slowness is not breakage.
             partial = _read_progress_steps(sbx)
             error = f"{exc}"[:800]
             if partial:
@@ -1345,7 +1348,7 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
                     f"{len(partial)} of {len(STEP_CHECK_NAMES)} steps recorded "
                     f"before the budget fired. {error}"
                 )[:800]
-            transport = True
+            timed_out, transport = True, False
         elif isinstance(exc, _PollingTimeout):
             error, transport = f"{exc}"[:800], True
         elif _is_transport_error(exc):
@@ -1364,6 +1367,7 @@ def run_browser_tests(sbx, base_url: str) -> BrowserTestResult:
             latency_s=round(time.perf_counter() - started, 1),
             transport_failed=transport,
             transport_retries=0,
+            script_timeout=timed_out,
         )
     report = None
     for line in (result.stdout or "").splitlines():

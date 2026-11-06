@@ -18,7 +18,7 @@ export interface VerificationCheck {
 
 export interface BrowserStep {
   name: string;
-  status: "pass" | "fail" | "not_applicable" | "blocked";
+  status: "pass" | "fail" | "not_applicable" | "blocked" | "not_run";
   detail: string;
   duration_ms: number;
 }
@@ -48,6 +48,7 @@ export interface E2BVerification {
   browser: BrowserTestResult | null;
   transport_failed: boolean;
   transport_retries: number;
+  script_timeout: boolean;
 }
 
 export interface AuditFinding {
